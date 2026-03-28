@@ -265,7 +265,7 @@ export default function App() {
 function LoginView() {
   const [email, setEmail] = useState(''); const [password, setPassword] = useState('');
   const handleLogin = async (e) => { e.preventDefault(); const { error } = await supabase.auth.signInWithPassword({ email, password }); if (error) alert(error.message); };
-  return (<div style={loginOverlay}><form onSubmit={handleLogin} style={loginForm}><h2>Jedzonko Planer</h2><input style={inputS} type="email" placeholder="Email" onChange={e => setEmail(e.target.value)} /><input style={inputS} type="password" placeholder="Hasło" onChange={e => setPassword(e.target.value)} /><button style={btnSuccessFull}>Zaloguj się</button></form></div>);
+  return (<div style={loginOverlay}><form onSubmit={handleLogin} style={loginForm}><h2>Jedzonko P</h2><input style={inputS} type="email" placeholder="Email" onChange={e => setEmail(e.target.value)} /><input style={inputS} type="password" placeholder="Hasło" onChange={e => setPassword(e.target.value)} /><button style={btnSuccessFull}>Zaloguj się</button></form></div>);
 }
 
 function Modal({ title, children, onClose, isMobile }) {
