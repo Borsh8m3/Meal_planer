@@ -235,7 +235,7 @@ export default function App() {
 
       {/* MODAL: STATYSTYKI (ŚLEDŹ ZAKUPY) */}
       {activeModal === 'stats' && (
-        <Modal title="📈 Twoje Wydatki i Nawyki" onClose={() => setActiveModal(null)} isMobile={isMobile}>
+        <Modal title="📈 Summary" onClose={() => setActiveModal(null)} isMobile={isMobile}>
           <div style={{maxHeight:'70vh', overflowY:'auto'}}>
             <div style={statSection}>
               <h4>💳 Wydatki miesięczne</h4>
@@ -252,7 +252,7 @@ export default function App() {
             </div>
 
             <div style={statSection}>
-              <h4>💸 Najkosztowniejsze składniki (sumarycznie)</h4>
+              <h4>💸 Najkosztowniejsze składniki</h4>
               {advancedStats.topIngredients.map(([name, data]) => (
                 <div key={name} style={sideRow}><span>{name}</span><b style={{color:'#ef4444'}}>{data.cost.toFixed(2)} zł</b></div>
               ))}
