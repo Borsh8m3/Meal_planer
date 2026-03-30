@@ -3,10 +3,13 @@ name: Deploy Jedzonko Planer
 on:
   push:
     branches:
-      - main  # lub master, zależnie jak nazywa się Twoja gałąź
+      - main  # Sprawdź czy Twoja gałąź to 'main' czy 'master'
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,19 +19,21 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20  # Ustawienie wersji Node
+          node-version: 20
+          cache: 'npm' # To przyspieszy kolejne buildy
 
       - name: Install dependencies
-        run: npm install  # TO JEST KLUCZOWE - bez tego wywali błąd 127
+        run: npm install
 
       - name: Build project
         run: npm run build
         env:
+          # GitHub musi znać te zmienne, aby build się udał
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
-      - name: Deploy to GitHub Pages # (Jeśli tam hostujesz)
+      - name: Deploy to GitHub Pages
         uses: JamesIves/github-pages-deploy-action@v4
         with:
-          folder: dist # Vite buduje do folderu dist
-          branch: gh-pages
+          folder: dist # Folder, w którym Vite generuje gotową stronę
+          branch: gh-pages # Gałąź, na której GitHub trzyma pliki strony
