@@ -14,7 +14,6 @@ const DAYS = [
   'Niedziela',
 ];
 
-// Zmienione, ujednolicone lekkie tło gradientowe (zielony wpadający w szary)
 const sharedGradient = 'linear-gradient(135deg, #dcfce7 0%, #e2e8f0 100%)';
 const MEAL_COLORS = {
   Śniadanie: sharedGradient,
@@ -40,7 +39,7 @@ export default function App() {
   const [viewingRecipe, setViewingRecipe] = useState(null);
   const [viewMode, setViewMode] = useState('desc');
   const [filterCategory, setFilterCategory] = useState('');
-  const [recipeListCategory, setRecipeListCategory] = useState(''); // Domyślnie "Wszystkie"
+  const [recipeListCategory, setRecipeListCategory] = useState('');
 
   const [newProd, setNewProd] = useState({
     id: null,
@@ -397,8 +396,10 @@ export default function App() {
               </div>
 
               {MEAL_TYPES.map((type) => {
+                // Bezpieczne sprawdzanie (p.recipes chroni przed uszkodzonymi danymi)
                 const m = mealPlan.find(
-                  (p) => p.date === day.fullDate && p.meal_type === type
+                  (p) =>
+                    p.date === day.fullDate && p.meal_type === type && p.recipes
                 );
 
                 const hasImage = m?.recipes?.image_url;
@@ -497,7 +498,6 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      // PUSTY KAFELEK - z nowoczesnym przyciskiem +
                       <div style={emptyCellPlus}>+</div>
                     )}
                   </div>
@@ -1010,11 +1010,25 @@ export default function App() {
                     </button>
                     <button
                       onClick={async () => {
-                        if (confirm('Usunąć przepis z bazy?')) {
+                        if (
+                          confirm(
+                            'Usunąć przepis z bazy? Zniknie on ze wszystkich dni w kalendarzu.'
+                          )
+                        ) {
+                          // Bezpieczne usuwanie kaskadowe
                           await supabase
+                            .from('meal_plan')
+                            .delete()
+                            .eq('recipe_id', r.id);
+                          await supabase
+                            .from('recipe_ingredients')
+                            .delete()
+                            .eq('recipe_id', r.id);
+                          const { error } = await supabase
                             .from('recipes')
                             .delete()
                             .eq('id', r.id);
+                          if (error) alert('Błąd: ' + error.message);
                           fetchData();
                         }
                       }}
@@ -1119,8 +1133,21 @@ export default function App() {
                   </button>
                   <button
                     onClick={async () => {
-                      if (confirm('Usunąć produkt z bazy?')) {
-                        await supabase.from('products').delete().eq('id', p.id);
+                      if (
+                        confirm(
+                          'Usunąć produkt z bazy? Zostanie on usunięty ze wszystkich Twoich przepisów.'
+                        )
+                      ) {
+                        // Bezpieczne usuwanie kaskadowe
+                        await supabase
+                          .from('recipe_ingredients')
+                          .delete()
+                          .eq('product_id', p.id);
+                        const { error } = await supabase
+                          .from('products')
+                          .delete()
+                          .eq('id', p.id);
+                        if (error) alert('Błąd: ' + error.message);
                         fetchData();
                       }
                     }}
@@ -1180,7 +1207,6 @@ export default function App() {
         </Modal>
       )}
 
-      {/* W TYM MODALU TERAZ JEST PASEK FILTRÓW! */}
       {activeModal === 'cell' && (
         <Modal
           title={`Wybierz posiłek: ${selectedCell?.type}`}
