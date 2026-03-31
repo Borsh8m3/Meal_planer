@@ -1,7 +1,18 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+// const SUPABASE_URL = 'TWÓJ_URL';
+// const SUPABASE_ANON_KEY = 'TWÓJ_KLUCZ';
+// const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from 'react';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
+
 
 const MEAL_TYPES = ['Śniadanie', 'Lunch', 'Obiad', 'Podwieczorek', 'Kolacja'];
 const DAYS = [
@@ -40,6 +51,12 @@ export default function App() {
   const [viewMode, setViewMode] = useState('desc');
   const [filterCategory, setFilterCategory] = useState('');
   const [recipeListCategory, setRecipeListCategory] = useState('');
+
+  // --- STANY DLA TRYBU GOTOWANIA ---
+  const [cookingStep, setCookingStep] = useState(0);
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const recognitionRef = useRef(null);
+  const isVoiceActiveRef = useRef(isVoiceActive);
 
   const [newProd, setNewProd] = useState({
     id: null,
@@ -84,6 +101,80 @@ export default function App() {
     if (session) fetchData();
   }, [session, weekOffset]);
 
+  // --- INICJALIZACJA ROZPOZNAWANIA MOWY ---
+  useEffect(() => {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'pl-PL';
+      recognition.continuous = false; // Lepsze rezultaty przy restarcie na onend
+      recognition.interimResults = false;
+
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript.toLowerCase().trim();
+        console.log('Słyszę:', transcript);
+
+        if (
+          transcript.includes('dalej') ||
+          transcript.includes('następny') ||
+          transcript.includes('kolejna') ||
+          transcript.includes('kolejny')
+        ) {
+          setCookingStep((prev) => {
+            const max = viewingRecipe?.steps?.length
+              ? viewingRecipe.steps.length - 1
+              : 0;
+            return Math.min(prev + 1, max);
+          });
+        } else if (
+          transcript.includes('wstecz') ||
+          transcript.includes('poprzedni') ||
+          transcript.includes('cofnij') ||
+          transcript.includes('wróć')
+        ) {
+          setCookingStep((prev) => Math.max(prev - 1, 0));
+        } else if (
+          transcript.includes('zamknij') ||
+          transcript.includes('koniec') ||
+          transcript.includes('zakończ')
+        ) {
+          setActiveModal('view-recipe');
+          setIsVoiceActive(false);
+        }
+      };
+
+      recognition.onend = () => {
+        if (isVoiceActiveRef.current) {
+          try {
+            recognition.start();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      };
+
+      recognitionRef.current = recognition;
+    }
+  }, [viewingRecipe]); // Zależy od viewingRecipe, żeby znać długość tablicy steps
+
+  // Kontrola nasłuchiwania przy zmianie stanu isVoiceActive
+  useEffect(() => {
+    isVoiceActiveRef.current = isVoiceActive;
+    if (isVoiceActive && recognitionRef.current) {
+      try {
+        recognitionRef.current.start();
+      } catch (e) {}
+    } else if (!isVoiceActive && recognitionRef.current) {
+      recognitionRef.current.stop();
+    }
+
+    // Sprzątanie po zamknięciu
+    return () => {
+      if (recognitionRef.current) recognitionRef.current.stop();
+    };
+  }, [isVoiceActive]);
+
   async function fetchData() {
     const { data: prods } = await supabase
       .from('products')
@@ -121,11 +212,9 @@ export default function App() {
   const advancedStats = useMemo(() => {
     const monthlySpending = {};
     const ingredientStats = {};
-
     mealPlan.forEach((meal) => {
       const recipe = recipes.find((r) => r.id === meal.recipe_id);
       if (!recipe) return;
-
       const dateObj = new Date(meal.date);
       const monthLabel = dateObj.toLocaleDateString('pl-PL', {
         month: 'long',
@@ -133,30 +222,23 @@ export default function App() {
       });
       monthlySpending[monthLabel] =
         (monthlySpending[monthLabel] || 0) + parseFloat(recipe.total_cost);
-
       recipe.recipe_ingredients?.forEach((ri) => {
         const p = ri.products;
         if (!p) return;
         if (!ingredientStats[p.name])
           ingredientStats[p.name] = { count: 0, totalCost: 0, unit: p.unit };
-
         ingredientStats[p.name].count += 1;
         ingredientStats[p.name].totalCost += p.price_per_unit * ri.amount;
       });
     });
-
-    const topByCount = Object.entries(ingredientStats)
-      .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 5);
-
-    const topByCost = Object.entries(ingredientStats)
-      .sort((a, b) => b[1].totalCost - a[1].totalCost)
-      .slice(0, 5);
-
     return {
       monthly: Object.entries(monthlySpending).reverse(),
-      topByCount,
-      topByCost,
+      topByCount: Object.entries(ingredientStats)
+        .sort((a, b) => b[1].count - a[1].count)
+        .slice(0, 5),
+      topByCost: Object.entries(ingredientStats)
+        .sort((a, b) => b[1].totalCost - a[1].totalCost)
+        .slice(0, 5),
     };
   }, [mealPlan, recipes]);
 
@@ -298,7 +380,6 @@ export default function App() {
   const handleEditRecipeDirectly = (recipeInfo) => {
     const fullRecipe = recipes.find((r) => r.id === recipeInfo.id);
     if (!fullRecipe) return;
-
     setNewRecipe({
       ...fullRecipe,
       ingredients: (fullRecipe.recipe_ingredients || []).map((ri) => ({
@@ -309,7 +390,6 @@ export default function App() {
     });
     setRecipeListCategory(fullRecipe.category || 'Obiad');
     setActiveModal('recipe');
-
     setTimeout(() => {
       const scrollContainer = document.querySelector(
         '.recipe-scroll-container'
@@ -324,6 +404,22 @@ export default function App() {
       .update({ is_favorite: !currentStatus })
       .eq('id', recipeId);
     fetchData();
+  };
+
+  // --- FUNKCJA SZUKAJĄCA SKŁADNIKÓW W TEKŚCIE KROKU ---
+  const getIngredientsForStep = (stepText, recipeIngredients) => {
+    if (!stepText || !recipeIngredients) return [];
+    const textLower = stepText.toLowerCase();
+
+    return recipeIngredients.filter((ri) => {
+      const pName = ri.products?.name;
+      if (!pName) return false;
+      // Szukamy rdzenia słowa (odrzucamy 2 ostatnie litery żeby złapać odmiany np. Cebulę -> Cebula)
+      // Zabezpieczamy krótkie słowa (np. Sól)
+      const minLength = Math.max(3, pName.length - 2);
+      const stem = pName.toLowerCase().substring(0, minLength);
+      return textLower.includes(stem);
+    });
   };
 
   if (loading) return <div style={loadingStyle}>🍳 Ładowanie...</div>;
@@ -383,12 +479,23 @@ export default function App() {
           {weekDates.map((day) => (
             <React.Fragment key={day.fullDate}>
               <div style={isMobile ? mobileDayLabel : dayCell}>
-                <b style={{ fontSize: '13px' }}>{day.name}</b>
-                <br />
+                <b
+                  style={{
+                    fontSize: '12px',
+                    wordBreak: 'break-word',
+                    hyphens: 'auto',
+                    width: '100%',
+                    lineHeight: '1.2',
+                  }}
+                >
+                  {day.name}
+                </b>
+                {!isMobile && <br />}
                 <small
                   style={{
                     fontSize: '10px',
                     color: isMobile ? '#cbd5e1' : '#64748b',
+                    marginTop: '4px',
                   }}
                 >
                   {day.displayDate}
@@ -396,13 +503,13 @@ export default function App() {
               </div>
 
               {MEAL_TYPES.map((type) => {
-                // Bezpieczne sprawdzanie (p.recipes chroni przed uszkodzonymi danymi)
                 const m = mealPlan.find(
                   (p) =>
                     p.date === day.fullDate && p.meal_type === type && p.recipes
                 );
-
-                const hasImage = m?.recipes?.image_url;
+                const hasImage = Boolean(
+                  m?.recipes?.image_url && m.recipes.image_url.trim() !== ''
+                );
                 const bgStyle = hasImage
                   ? `linear-gradient(to bottom, rgba(0,0,0,0.1) 40%, rgba(0,0,0,0.8) 100%), url(${m.recipes.image_url})`
                   : MEAL_COLORS[type];
@@ -424,7 +531,19 @@ export default function App() {
                       }
                     }}
                   >
-                    {isMobile && <span style={mobileMealTag}>{type}</span>}
+                    {isMobile && (
+                      <span
+                        style={{
+                          ...mobileMealTag,
+                          color: hasImage ? 'white' : '#475569',
+                          textShadow: hasImage
+                            ? '0 1px 2px rgba(0,0,0,0.8)'
+                            : 'none',
+                        }}
+                      >
+                        {type}
+                      </span>
+                    )}
 
                     {m ? (
                       <div style={mealContent}>
@@ -459,7 +578,7 @@ export default function App() {
                             onClick={(e) => {
                               e.stopPropagation();
                               setViewingRecipe(m.recipes);
-                              setViewMode('desc');
+                              setViewMode('steps'); // Od razu otwieramy na krokach
                               setActiveModal('view-recipe');
                             }}
                           >
@@ -481,7 +600,14 @@ export default function App() {
                             ✏️
                           </button>
                           <button
-                            style={btnDelSmall}
+                            style={{
+                              ...btnActionSmall,
+                              background: hasImage
+                                ? 'rgba(239, 68, 68, 0.8)'
+                                : '#ef4444',
+                              color: 'white',
+                              border: 'none',
+                            }}
                             onClick={async (e) => {
                               e.stopPropagation();
                               if (confirm('Usunąć z planu?')) {
@@ -539,6 +665,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* --- KOSZYK --- */}
       <div style={shoppingPanel}>
         <div
           style={{
@@ -652,7 +779,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* --- MODAL: STATYSTYKI --- */}
+      {/* --- MODALE --- */}
       {activeModal === 'stats' && (
         <Modal
           title="📈 Twoje Statystyki"
@@ -669,7 +796,6 @@ export default function App() {
                 </div>
               ))}
             </div>
-
             <div style={statBoxS}>
               <h4 style={statLabelS}>⭐ Najczęściej używane produkty</h4>
               {advancedStats.topByCount.map(([name, data]) => (
@@ -679,7 +805,6 @@ export default function App() {
                 </div>
               ))}
             </div>
-
             <div style={statBoxS}>
               <h4 style={statLabelS}>💸 Największe wydatki (suma)</h4>
               {advancedStats.topByCost.map(([name, data]) => (
@@ -695,7 +820,6 @@ export default function App() {
         </Modal>
       )}
 
-      {/* POZOSTAŁE MODALE (Produkty, Przepisy, Podgląd) */}
       {activeModal === 'add-to-cart' && (
         <Modal
           title="🛒 Dodaj do listy"
@@ -911,7 +1035,12 @@ export default function App() {
                   <div style={{ display: 'flex', gap: '5px' }}>
                     <input
                       type="number"
-                      style={{ width: '50px' }}
+                      style={{
+                        ...inputS,
+                        width: '60px',
+                        padding: '8px',
+                        marginBottom: 0,
+                      }}
                       value={ing.amount}
                       onChange={(e) => {
                         const c = [...newRecipe.ingredients];
@@ -919,7 +1048,7 @@ export default function App() {
                         setNewRecipe({ ...newRecipe, ingredients: c });
                       }}
                     />
-                    <span>{ing.unit}</span>
+                    <span style={{ alignSelf: 'center' }}>{ing.unit}</span>
                     <button
                       onClick={() =>
                         setNewRecipe({
@@ -933,6 +1062,7 @@ export default function App() {
                         color: 'red',
                         border: 'none',
                         background: 'none',
+                        cursor: 'pointer',
                       }}
                     >
                       ✕
@@ -1010,12 +1140,7 @@ export default function App() {
                     </button>
                     <button
                       onClick={async () => {
-                        if (
-                          confirm(
-                            'Usunąć przepis z bazy? Zniknie on ze wszystkich dni w kalendarzu.'
-                          )
-                        ) {
-                          // Bezpieczne usuwanie kaskadowe
+                        if (confirm('Usunąć przepis z bazy?')) {
                           await supabase
                             .from('meal_plan')
                             .delete()
@@ -1024,11 +1149,10 @@ export default function App() {
                             .from('recipe_ingredients')
                             .delete()
                             .eq('recipe_id', r.id);
-                          const { error } = await supabase
+                          await supabase
                             .from('recipes')
                             .delete()
                             .eq('id', r.id);
-                          if (error) alert('Błąd: ' + error.message);
                           fetchData();
                         }
                       }}
@@ -1059,7 +1183,7 @@ export default function App() {
             />
             <div style={{ display: 'flex', gap: '5px' }}>
               <input
-                style={inputS}
+                style={{ ...inputS, marginBottom: 0 }}
                 type="number"
                 placeholder="Cena"
                 value={newProd.price}
@@ -1068,7 +1192,7 @@ export default function App() {
                 }
               />
               <input
-                style={inputS}
+                style={{ ...inputS, marginBottom: 0 }}
                 type="number"
                 placeholder="Ilość"
                 value={newProd.amount}
@@ -1077,7 +1201,7 @@ export default function App() {
                 }
               />
               <select
-                style={inputS}
+                style={{ ...inputS, marginBottom: 0 }}
                 value={newProd.unit}
                 onChange={(e) =>
                   setNewProd({ ...newProd, unit: e.target.value })
@@ -1133,21 +1257,12 @@ export default function App() {
                   </button>
                   <button
                     onClick={async () => {
-                      if (
-                        confirm(
-                          'Usunąć produkt z bazy? Zostanie on usunięty ze wszystkich Twoich przepisów.'
-                        )
-                      ) {
-                        // Bezpieczne usuwanie kaskadowe
+                      if (confirm('Usunąć produkt z bazy?')) {
                         await supabase
                           .from('recipe_ingredients')
                           .delete()
                           .eq('product_id', p.id);
-                        const { error } = await supabase
-                          .from('products')
-                          .delete()
-                          .eq('id', p.id);
-                        if (error) alert('Błąd: ' + error.message);
+                        await supabase.from('products').delete().eq('id', p.id);
                         fetchData();
                       }
                     }}
@@ -1162,12 +1277,31 @@ export default function App() {
         </Modal>
       )}
 
+      {/* --- NORMALNY PODGLĄD PRZEPISU --- */}
       {activeModal === 'view-recipe' && viewingRecipe && (
         <Modal
           title={viewingRecipe.name}
           onClose={() => setActiveModal(null)}
           isMobile={isMobile}
         >
+          <button
+            style={{
+              ...btnSuccessFull,
+              marginBottom: '15px',
+              display: 'flex',
+              justifyContent: 'center',
+              gap: '10px',
+              alignItems: 'center',
+            }}
+            onClick={() => {
+              setCookingStep(0);
+              setIsVoiceActive(false);
+              setActiveModal('cooking-mode');
+            }}
+          >
+            <span style={{ fontSize: '20px' }}>👨‍🍳</span> ROZPOCZNIJ GOTOWANIE
+          </button>
+
           <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
             <button
               style={viewMode === 'desc' ? btnFilterActive : btnFilter}
@@ -1182,7 +1316,7 @@ export default function App() {
               Kroki
             </button>
           </div>
-          <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
             {viewMode === 'desc' ? (
               <p
                 style={{
@@ -1193,20 +1327,154 @@ export default function App() {
                   fontSize: '14px',
                 }}
               >
-                {viewingRecipe.instructions}
+                {viewingRecipe.instructions || 'Brak opisu.'}
               </p>
-            ) : (
-              viewingRecipe.steps?.map((s, i) => (
+            ) : viewingRecipe.steps?.length > 0 ? (
+              viewingRecipe.steps.map((s, i) => (
                 <div key={i} style={stepItemS}>
                   <div style={stepCircleS}>{i + 1}</div>
                   <div style={{ flex: 1, fontSize: '14px' }}>{s}</div>
                 </div>
               ))
+            ) : (
+              <p
+                style={{
+                  textAlign: 'center',
+                  color: '#64748b',
+                  margin: '20px 0',
+                }}
+              >
+                Brak dodanych kroków.
+              </p>
             )}
           </div>
         </Modal>
       )}
 
+      {/* --- TRYB GOTOWANIA (PEŁNY EKRAN) --- */}
+      {activeModal === 'cooking-mode' && viewingRecipe && (
+        <div style={cookingOverlayS}>
+          <div style={cookingCardS}>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '30px',
+              }}
+            >
+              <button
+                onClick={() => {
+                  setIsVoiceActive(false);
+                  setActiveModal('view-recipe');
+                }}
+                style={btnSec}
+              >
+                ⬅ Powrót
+              </button>
+
+              <button
+                onClick={() => setIsVoiceActive(!isVoiceActive)}
+                style={{
+                  ...btnSec,
+                  background: isVoiceActive ? '#fee2e2' : '#f1f5f9',
+                  color: isVoiceActive ? '#ef4444' : '#475569',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                {isVoiceActive ? '🔴 Nasłuchuję...' : '🎙️ Sterowanie Głosem'}
+              </button>
+            </div>
+
+            <div
+              style={{
+                color: '#059669',
+                fontWeight: 'bold',
+                marginBottom: '10px',
+              }}
+            >
+              KROK {cookingStep + 1} Z {viewingRecipe.steps?.length || 0}
+            </div>
+
+            {/* DUŻY TEKST KROKU */}
+            <div
+              style={{
+                fontSize: isMobile ? '22px' : '32px',
+                fontWeight: 'bold',
+                color: '#1e293b',
+                minHeight: '150px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '20px 0',
+                lineHeight: '1.4',
+              }}
+            >
+              {viewingRecipe.steps?.[cookingStep] || 'Brak treści kroku.'}
+            </div>
+
+            {/* INTELIGENTNE PIGUŁKI SKŁADNIKÓW */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '10px',
+                justifyContent: 'center',
+                minHeight: '50px',
+              }}
+            >
+              {getIngredientsForStep(
+                viewingRecipe.steps?.[cookingStep],
+                viewingRecipe.recipe_ingredients
+              ).map((ri, idx) => (
+                <div key={idx} style={smartPillS}>
+                  🥑 {ri.products.name}{' '}
+                  <b>
+                    {ri.amount} {ri.products.unit}
+                  </b>
+                </div>
+              ))}
+            </div>
+
+            {/* NAWIGACJA KROKÓW */}
+            <div style={{ display: 'flex', gap: '15px', marginTop: '40px' }}>
+              <button
+                style={{
+                  ...btnSuccessFull,
+                  background: '#f1f5f9',
+                  color: '#475569',
+                  flex: 1,
+                }}
+                onClick={() => setCookingStep((prev) => Math.max(prev - 1, 0))}
+                disabled={cookingStep === 0}
+              >
+                Wstecz
+              </button>
+              <button
+                style={{ ...btnSuccessFull, flex: 2 }}
+                onClick={() => {
+                  if (cookingStep === viewingRecipe.steps.length - 1) {
+                    setActiveModal('view-recipe');
+                    setIsVoiceActive(false);
+                  } else {
+                    setCookingStep((prev) =>
+                      Math.min(prev + 1, viewingRecipe.steps.length - 1)
+                    );
+                  }
+                }}
+              >
+                {cookingStep === viewingRecipe.steps?.length - 1
+                  ? 'Zakończ 🎉'
+                  : 'Dalej ➡'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- WYBÓR POSIŁKU --- */}
       {activeModal === 'cell' && (
         <Modal
           title={`Wybierz posiłek: ${selectedCell?.type}`}
@@ -1239,13 +1507,15 @@ export default function App() {
                   key={r.id}
                   style={recipeListItem}
                   onClick={async () => {
-                    await supabase.from('meal_plan').insert([
-                      {
-                        date: selectedCell.date,
-                        meal_type: selectedCell.type,
-                        recipe_id: r.id,
-                      },
-                    ]);
+                    await supabase
+                      .from('meal_plan')
+                      .insert([
+                        {
+                          date: selectedCell.date,
+                          meal_type: selectedCell.type,
+                          recipe_id: r.id,
+                        },
+                      ]);
                     setActiveModal(null);
                     fetchData();
                   }}
@@ -1316,6 +1586,7 @@ function Modal({ title, children, onClose, isMobile }) {
     boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)',
     zIndex: 1100,
     position: 'relative',
+    boxSizing: 'border-box',
   };
   return (
     <div style={overlayS} onClick={onClose}>
@@ -1348,7 +1619,7 @@ function Modal({ title, children, onClose, isMobile }) {
   );
 }
 
-// --- STYLE ---
+// --- STYLES ---
 const appContainer = {
   padding: '10px',
   backgroundColor: '#f8fafc',
@@ -1445,19 +1716,23 @@ const btnDanger = {
 };
 const gridStyle = {
   display: 'grid',
-  gridTemplateColumns: '90px repeat(6, 1fr)',
-  gap: '12px',
+  gridTemplateColumns: '100px repeat(6, 1fr)',
+  gap: '10px',
 };
 const layoutGrid = { display: 'grid', gridTemplateColumns: '1fr', gap: '15px' };
 const mobileStack = { display: 'flex', flexDirection: 'column', gap: '10px' };
 
 const dayCell = {
   background: 'white',
-  padding: '10px',
+  padding: '10px 5px',
   borderRadius: '16px',
   textAlign: 'center',
   borderLeft: '4px solid #059669',
   boxShadow: '0 2px 4px rgba(0,0,0,0.02)',
+  display: 'flex',
+  flexDirection: 'column',
+  justifyContent: 'center',
+  alignItems: 'center',
 };
 const mobileDayLabel = {
   background: '#1e293b',
@@ -1493,7 +1768,6 @@ const cellStyleActive = {
   border: 'none',
   boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
 };
-
 const emptyCellPlus = {
   width: '32px',
   height: '32px',
@@ -1506,7 +1780,6 @@ const emptyCellPlus = {
   fontWeight: 'bold',
   fontSize: '20px',
 };
-
 const mealContent = {
   width: '100%',
   height: '100%',
@@ -1522,7 +1795,6 @@ const mealNameS = {
   textAlign: 'center',
   marginBottom: '4px',
 };
-
 const daySumCell = {
   background: '#f0fdf4',
   padding: '10px',
@@ -1578,6 +1850,14 @@ const btnDelSmallStatic = {
   height: '24px',
   cursor: 'pointer',
 };
+const mobileMealTag = {
+  position: 'absolute',
+  top: '10px',
+  left: '10px',
+  fontSize: '10px',
+  fontWeight: '900',
+  textTransform: 'uppercase',
+};
 
 const shoppingPanel = {
   marginTop: '20px',
@@ -1600,13 +1880,17 @@ const shoppingItem = {
   alignItems: 'center',
   boxShadow: '0 2px 4px rgba(0,0,0,0.02)',
 };
+
 const inputS = {
   width: '100%',
+  boxSizing: 'border-box',
   padding: '12px',
-  marginBottom: '8px',
+  marginBottom: '10px',
   borderRadius: '12px',
-  border: '1px solid #e2e8f0',
+  border: '1px solid #cbd5e1',
   fontSize: '14px',
+  fontFamily: 'inherit',
+  backgroundColor: '#fff',
 };
 const btnSuccessFull = {
   background: '#059669',
@@ -1675,6 +1959,7 @@ const iconBtn = {
   cursor: 'pointer',
   fontSize: '18px',
 };
+
 const overlayS = {
   position: 'fixed',
   top: 0,
@@ -1697,9 +1982,11 @@ const loginOverlay = {
 };
 const loginForm = {
   background: 'white',
-  padding: '40px',
+  padding: '40px 30px',
   borderRadius: '25px',
-  width: '320px',
+  width: '90%',
+  maxWidth: '350px',
+  boxSizing: 'border-box',
   boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
 };
 const loadingStyle = {
@@ -1710,16 +1997,6 @@ const loadingStyle = {
   color: '#059669',
   fontSize: '18px',
   fontWeight: 'bold',
-};
-const mobileMealTag = {
-  position: 'absolute',
-  top: '6px',
-  left: '8px',
-  fontSize: '9px',
-  color: 'rgba(255,255,255,0.8)',
-  fontWeight: 'bold',
-  textTransform: 'uppercase',
-  textShadow: '0 1px 2px rgba(0,0,0,0.5)',
 };
 const formBoxS = {
   background: '#f8fafc',
@@ -1794,4 +2071,25 @@ const statLabelS = {
   borderBottom: '2px solid #059669',
   display: 'inline-block',
   paddingBottom: '4px',
+};
+
+// Style dla Trybu Gotowania
+const cookingOverlayS = { ...overlayS, background: 'rgba(15, 23, 42, 0.98)' };
+const cookingCardS = {
+  background: 'white',
+  padding: '30px',
+  borderRadius: '30px',
+  width: '95%',
+  maxWidth: '800px',
+  boxSizing: 'border-box',
+  display: 'flex',
+  flexDirection: 'column',
+};
+const smartPillS = {
+  background: '#ecfdf5',
+  color: '#059669',
+  padding: '8px 16px',
+  borderRadius: '20px',
+  border: '1px solid #34d399',
+  fontSize: '14px',
 };
