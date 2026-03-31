@@ -131,6 +131,17 @@ export default function App() {
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [aiUrl, setAiUrl] = useState('');
 
+  const [showRecipeForm, setShowRecipeForm] = useState(false);
+  const [showProductForm, setShowProductForm] = useState(false);
+  const [cartModalTab, setCartModalTab] = useState('recipes');
+
+  const [commentText, setCommentText] = useState('');
+  const [commentingMealId, setCommentingMealId] = useState(null);
+
+  // Zmienne do dropdowna w wyszukiwarce
+  const [showSearchDropdown, setShowSearchDropdown] = useState(false);
+  const searchContainerRef = useRef(null);
+
   const [newProd, setNewProd] = useState({
     id: null,
     name: '',
@@ -151,6 +162,20 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
 
   const handleLogout = useCallback(() => supabase.auth.signOut(), []);
+
+  // Chowanie dropdowna po kliknięciu w tło
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        searchContainerRef.current &&
+        !searchContainerRef.current.contains(event.target)
+      ) {
+        setShowSearchDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     document.title = 'Jedzonko Planer 🥗';
@@ -453,24 +478,41 @@ export default function App() {
     }
 
     let jsonText = data.candidates[0].content.parts[0].text;
-
-    // Solidne poszukiwanie obiektu JSON w odpowiedźi AI
-    const firstBrace = jsonText.indexOf('{');
-    const lastBrace = jsonText.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1) {
-      jsonText = jsonText.substring(firstBrace, lastBrace + 1);
-    } else {
-      throw new Error('AI nie zwróciło poprawnego formatu JSON.');
-    }
+    jsonText = jsonText
+      .replace(/```json\n?/gi, '')
+      .replace(/```/gi, '')
+      .trim();
 
     const aiRecipe = JSON.parse(jsonText);
 
+    // MĄDRZEJSZE MAPOWANIE SKŁADNIKÓW Z AI
     const mappedIngredients = (aiRecipe.ingredients || []).map((aiIng) => {
-      const foundDbProduct = products.find(
-        (p) =>
-          p.name.toLowerCase().includes(aiIng.name.toLowerCase()) ||
-          aiIng.name.toLowerCase().includes(p.name.toLowerCase())
+      const aiNameLower = aiIng.name.toLowerCase();
+
+      // 1. Dokładne dopasowanie
+      let foundDbProduct = products.find(
+        (p) => p.name.toLowerCase() === aiNameLower
       );
+
+      // 2. Dopasowanie częściowe (inkluzja w obie strony)
+      if (!foundDbProduct) {
+        foundDbProduct = products.find(
+          (p) =>
+            p.name.toLowerCase().includes(aiNameLower) ||
+            aiNameLower.includes(p.name.toLowerCase())
+        );
+      }
+
+      // 3. Dopasowanie po słowach (szukanie np. słowa "mąka" w "mąka pszenna typ 500")
+      if (!foundDbProduct) {
+        const words = aiNameLower.split(/[\s,.-]+/).filter((w) => w.length > 3);
+        for (const word of words) {
+          foundDbProduct = products.find((p) =>
+            p.name.toLowerCase().includes(word)
+          );
+          if (foundDbProduct) break;
+        }
+      }
 
       if (foundDbProduct) {
         return {
@@ -479,9 +521,11 @@ export default function App() {
           unit: aiIng.unit || foundDbProduct.unit,
         };
       }
+
+      // Brak w bazie
       return {
         id: null,
-        name: `⚠️ ${aiIng.name} - brak w bazie`,
+        name: `⚠️ ${aiIng.name}`,
         amount: aiIng.amount || 100,
         unit: aiIng.unit || 'g',
       };
@@ -525,9 +569,8 @@ export default function App() {
         ]
       }`;
 
-      // ZMIENIONY MODEL NA gemini-3.0-flash-preview
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.0-flash-preview:generateContent?key=${GEMINI_API_KEY}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -582,7 +625,6 @@ export default function App() {
         ]
       }`;
 
-      // ZMIENIONY MODEL NA gemini-3.0-flash-preview
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.0-flash-preview:generateContent?key=${GEMINI_API_KEY}`,
         {
@@ -666,7 +708,7 @@ export default function App() {
       ingredients: [],
       is_favorite: false,
     });
-    setActiveModal(null);
+    setShowRecipeForm(false);
     fetchData();
   };
 
@@ -682,6 +724,7 @@ export default function App() {
       await supabase.from('products').update(d).eq('id', newProd.id);
     else await supabase.from('products').insert([d]);
     setNewProd({ id: null, name: '', price: '', amount: '', unit: 'g' });
+    setShowProductForm(false);
     fetchData();
   };
 
@@ -697,6 +740,7 @@ export default function App() {
       })),
     });
     setRecipeListCategory(fullRecipe.category || 'Obiad');
+    setShowRecipeForm(true);
     setActiveModal('recipe');
     setTimeout(() => {
       const scrollContainer = document.querySelector(
@@ -856,6 +900,14 @@ export default function App() {
                         >
                           {m.recipes.is_favorite && '⭐ '}
                           {m.recipes.name}
+                          {m.comment && (
+                            <span
+                              style={{ marginLeft: '4px' }}
+                              title="Masz notatkę do tego posiłku"
+                            >
+                              📝
+                            </span>
+                          )}
                         </div>
                         <div
                           style={{
@@ -865,6 +917,24 @@ export default function App() {
                             marginTop: '8px',
                           }}
                         >
+                          <button
+                            style={{
+                              ...btnActionSmall,
+                              color: hasImage ? 'white' : '#f59e0b',
+                              background: hasImage
+                                ? 'rgba(255,255,255,0.25)'
+                                : 'rgba(245, 158, 11, 0.15)',
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setCommentingMealId(m.id);
+                              setCommentText(m.comment || '');
+                              setActiveModal('meal-comment');
+                            }}
+                            title="Notatka do posiłku"
+                          >
+                            📝
+                          </button>
                           <button
                             style={{
                               ...btnActionSmall,
@@ -1078,6 +1148,46 @@ export default function App() {
       </div>
 
       {/* --- MODALE --- */}
+
+      {/* MODAL: Notatka do posiłku */}
+      {activeModal === 'meal-comment' && (
+        <Modal
+          title="📝 Notatka do posiłku"
+          onClose={() => setActiveModal(null)}
+          isMobile={isMobile}
+          isLandscape={isLandscape}
+        >
+          <textarea
+            style={{ ...inputS, minHeight: '120px' }}
+            placeholder="Jak się czujesz po tym posiłku? Masz jakieś uwagi do diety?"
+            value={commentText}
+            onChange={(e) => setCommentText(e.target.value)}
+          />
+          <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+            <button
+              style={{ ...btnSec, flex: 1 }}
+              onClick={() => setActiveModal(null)}
+            >
+              Anuluj
+            </button>
+            <button
+              style={{ ...btnSuccessFull, flex: 2, marginTop: 0 }}
+              onClick={async () => {
+                await supabase
+                  .from('meal_plan')
+                  .update({ comment: commentText })
+                  .eq('id', commentingMealId);
+                setActiveModal(null);
+                fetchData();
+              }}
+            >
+              Zapisz notatkę
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* MODAL: Statystyki */}
       {activeModal === 'stats' && (
         <Modal
           title="📈 Twoje Statystyki"
@@ -1378,6 +1488,7 @@ export default function App() {
         </Modal>
       )}
 
+      {/* MODAL: Dodaj do listy manualnie */}
       {activeModal === 'add-to-cart' && (
         <Modal
           title="🛒 Dodaj do listy"
@@ -1387,71 +1498,104 @@ export default function App() {
         >
           <div
             style={{
-              maxHeight: isMobile && isLandscape ? '85vh' : '60vh',
-              overflowY: 'auto',
+              display: 'flex',
+              gap: '8px',
+              marginBottom: '15px',
+              borderBottom: '2px solid #f1f5f9',
+              paddingBottom: '10px',
             }}
           >
-            <h4 style={{ fontSize: '14px' }}>Z przepisu:</h4>
-            {recipes
-              .sort((a, b) => b.is_favorite - a.is_favorite)
-              .map((r) => (
-                <div
-                  key={r.id}
-                  style={recipeListItem}
-                  onClick={() => {
-                    setManualCart((p) => [
-                      ...p,
-                      ...r.recipe_ingredients.map((ri) => ({
-                        id: ri.products.id,
-                        name: ri.products.name,
-                        amount: ri.amount,
-                        unit: ri.products.unit,
-                        pricePU: ri.products.price_per_unit,
-                      })),
-                    ]);
-                    setActiveModal(null);
-                  }}
-                >
-                  <span>
-                    {r.is_favorite && '⭐ '}
-                    {r.name}
-                  </span>{' '}
-                  <button style={btnCartAddSmall}>+ Składniki</button>
-                </div>
-              ))}
-            <h4 style={{ fontSize: '14px', marginTop: '15px' }}>
-              Pojedynczy produkt:
-            </h4>
-            {products.map((p) => (
-              <div
-                key={p.id}
-                style={productRowS}
-                onClick={() => {
-                  setManualCart((prev) => [
-                    ...prev,
-                    {
-                      id: p.id,
-                      name: p.name,
-                      amount: p.last_input_quantity || 100,
-                      unit: p.unit,
-                      pricePU: p.price_per_unit,
-                    },
-                  ]);
-                  setActiveModal(null);
-                }}
-              >
-                <span>{p.name}</span>{' '}
-                <button style={btnCartAddSmall}>Dodaj</button>
-              </div>
-            ))}
+            <button
+              style={cartModalTab === 'recipes' ? statTabActive : statTabBtn}
+              onClick={() => setCartModalTab('recipes')}
+            >
+              Z przepisów
+            </button>
+            <button
+              style={cartModalTab === 'products' ? statTabActive : statTabBtn}
+              onClick={() => setCartModalTab('products')}
+            >
+              Pojedyncze produkty
+            </button>
+          </div>
+
+          <div
+            style={{
+              maxHeight: isMobile && isLandscape ? '85vh' : '60vh',
+              overflowY: 'auto',
+              paddingRight: '5px',
+            }}
+          >
+            {cartModalTab === 'recipes' && (
+              <>
+                {recipes
+                  .sort((a, b) => b.is_favorite - a.is_favorite)
+                  .map((r) => (
+                    <div
+                      key={r.id}
+                      style={recipeListItem}
+                      onClick={() => {
+                        setManualCart((p) => [
+                          ...p,
+                          ...r.recipe_ingredients.map((ri) => ({
+                            id: ri.products.id,
+                            name: ri.products.name,
+                            amount: ri.amount,
+                            unit: ri.products.unit,
+                            pricePU: ri.products.price_per_unit,
+                          })),
+                        ]);
+                        setActiveModal(null);
+                      }}
+                    >
+                      <span>
+                        {r.is_favorite && '⭐ '}
+                        {r.name}
+                      </span>{' '}
+                      <button style={btnCartAddSmall}>+ Składniki</button>
+                    </div>
+                  ))}
+              </>
+            )}
+
+            {cartModalTab === 'products' && (
+              <>
+                {products.map((p) => (
+                  <div
+                    key={p.id}
+                    style={productRowS}
+                    onClick={() => {
+                      setManualCart((prev) => [
+                        ...prev,
+                        {
+                          id: p.id,
+                          name: p.name,
+                          amount: p.last_input_quantity || 100,
+                          unit: p.unit,
+                          pricePU: p.price_per_unit,
+                        },
+                      ]);
+                      setActiveModal(null);
+                    }}
+                  >
+                    <span>{p.name}</span>{' '}
+                    <button style={btnCartAddSmall}>Dodaj</button>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </Modal>
       )}
 
+      {/* MODAL: Przepisy (Lista + Formularz) */}
       {activeModal === 'recipe' && (
         <Modal
           title="👨‍🍳 Przepisy"
-          onClose={() => setActiveModal(null)}
+          onClose={() => {
+            setActiveModal(null);
+            setShowRecipeForm(false);
+          }}
           isMobile={isMobile}
           isLandscape={isLandscape}
         >
@@ -1461,296 +1605,19 @@ export default function App() {
               maxHeight: isMobile && isLandscape ? '85vh' : '75vh',
               overflowY: 'auto',
               paddingRight: '5px',
+              paddingBottom: '20px',
             }}
           >
-            {/* --- AKORDEON: ASYSTENT AI --- */}
-            <div
-              style={{
-                ...formBoxS,
-                background: '#f5f3ff',
-                borderColor: '#c4b5fd',
-                marginBottom: '15px',
-              }}
-            >
-              <div
-                onClick={() => setShowAiPanel(!showAiPanel)}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  cursor: 'pointer',
-                }}
-              >
-                <h4 style={{ margin: 0, color: '#6d28d9', fontSize: '14px' }}>
-                  ✨ Asystent AI
-                </h4>
-                <span style={{ color: '#6d28d9', fontWeight: 'bold' }}>
-                  {showAiPanel ? '▲' : '▼'}
-                </span>
-              </div>
-
-              {showAiPanel && (
-                <div style={{ marginTop: '15px' }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      gap: '8px',
-                      marginBottom: '10px',
-                    }}
-                  >
-                    <input
-                      style={{
-                        ...inputS,
-                        marginBottom: 0,
-                        flex: 1,
-                        borderColor: '#c4b5fd',
-                      }}
-                      placeholder="Wklej link do przepisu..."
-                      value={aiUrl}
-                      onChange={(e) => setAiUrl(e.target.value)}
-                      disabled={isAiLoading}
-                    />
-                    <button
-                      onClick={handleAiRecipeFromUrl}
-                      style={{
-                        ...btnPrim,
-                        background: '#8b5cf6',
-                        whiteSpace: 'nowrap',
-                      }}
-                      disabled={isAiLoading || !aiUrl}
-                    >
-                      {isAiLoading ? '⏳...' : 'Pobierz'}
-                    </button>
-                  </div>
-
-                  <div
-                    style={{
-                      textAlign: 'center',
-                      color: '#8b5cf6',
-                      fontSize: '12px',
-                      fontWeight: 'bold',
-                      margin: '10px 0',
-                    }}
-                  >
-                    LUB
-                  </div>
-
-                  <label
-                    style={{
-                      ...btnPrim,
-                      display: 'block',
-                      textAlign: 'center',
-                      background: '#8b5cf6',
-                      fontSize: '14px',
-                      padding: '10px',
-                      cursor: 'pointer',
-                      opacity: isAiLoading ? 0.7 : 1,
-                    }}
-                  >
-                    {isAiLoading ? '⏳ Pracuję...' : '📷 Wczytaj ze zdjęcia'}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleAiRecipeScan}
-                      style={{ display: 'none' }}
-                      disabled={isAiLoading}
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
-
-            <div style={formBoxS}>
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                <input
-                  style={{ ...inputS, marginBottom: 0, flex: 1 }}
-                  placeholder="Nazwa dania"
-                  value={newRecipe.name}
-                  onChange={(e) =>
-                    setNewRecipe({ ...newRecipe, name: e.target.value })
-                  }
-                />
-                <select
+            {!showRecipeForm ? (
+              <>
+                <button
                   style={{
-                    ...inputS,
-                    marginBottom: 0,
-                    width: 'auto',
-                    padding: '5px',
+                    ...btnSuccessFull,
+                    marginBottom: '20px',
+                    fontSize: '16px',
+                    padding: '16px',
                   }}
-                  value={newRecipe.category}
-                  onChange={(e) =>
-                    setNewRecipe({ ...newRecipe, category: e.target.value })
-                  }
-                >
-                  {MEAL_TYPES.map((cat) => (
-                    <option key={cat} value={cat}>
-                      {cat}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  onClick={() =>
-                    setNewRecipe({
-                      ...newRecipe,
-                      is_favorite: !newRecipe.is_favorite,
-                    })
-                  }
-                  style={{ ...iconBtn, fontSize: '24px' }}
-                >
-                  {newRecipe.is_favorite ? '⭐' : '☆'}
-                </button>
-              </div>
-              <label style={fileLabelS}>
-                {newRecipe.image_url
-                  ? '✅ Zdjęcie wybrane'
-                  : '📷 Wybierz zdjęcie'}
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleFileUpload}
-                  style={{ display: 'none' }}
-                />
-              </label>
-              <textarea
-                style={{ ...inputS, minHeight: '80px' }}
-                placeholder="Opis..."
-                value={newRecipe.instructions}
-                onChange={(e) =>
-                  setNewRecipe({ ...newRecipe, instructions: e.target.value })
-                }
-              />
-              {newRecipe.steps.map((s, i) => (
-                <div
-                  key={i}
-                  style={{ display: 'flex', gap: '5px', marginTop: '5px' }}
-                >
-                  <div style={stepCircleS}>{i + 1}</div>
-                  <input
-                    style={{ ...inputS, marginBottom: 0 }}
-                    value={s}
-                    onChange={(e) => {
-                      const c = [...newRecipe.steps];
-                      c[i] = e.target.value;
-                      setNewRecipe({ ...newRecipe, steps: c });
-                    }}
-                  />
-                  <button
-                    onClick={() =>
-                      setNewRecipe({
-                        ...newRecipe,
-                        steps: newRecipe.steps.filter((_, idx) => idx !== i),
-                      })
-                    }
-                    style={btnDelSmallStatic}
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-              <button
-                style={{
-                  ...btnSec,
-                  width: '100%',
-                  padding: '8px',
-                  marginTop: '5px',
-                  marginBottom: '15px',
-                }}
-                onClick={() =>
-                  setNewRecipe({
-                    ...newRecipe,
-                    steps: [...newRecipe.steps, ''],
-                  })
-                }
-              >
-                + Krok
-              </button>
-              <input
-                style={inputS}
-                placeholder="🔍 Składnik..."
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-              {searchQuery && (
-                <div style={searchResultsS}>
-                  {products
-                    .filter((p) =>
-                      p.name.toLowerCase().includes(searchQuery.toLowerCase())
-                    )
-                    .map((p) => (
-                      <div
-                        key={p.id}
-                        style={searchItemS}
-                        onClick={() => {
-                          setNewRecipe({
-                            ...newRecipe,
-                            ingredients: [
-                              ...newRecipe.ingredients,
-                              { ...p, amount: 100 },
-                            ],
-                          });
-                          setSearchQuery('');
-                        }}
-                      >
-                        {p.name}
-                      </div>
-                    ))}
-                </div>
-              )}
-              {newRecipe.ingredients.map((ing, idx) => (
-                <div key={idx} style={ingRowS}>
-                  <span
-                    style={{
-                      fontSize: '12px',
-                      flex: 1,
-                      color: ing.id ? '#1e293b' : '#ef4444',
-                    }}
-                  >
-                    {ing.name}
-                  </span>
-                  <div style={{ display: 'flex', gap: '5px' }}>
-                    <input
-                      type="number"
-                      style={{
-                        ...inputS,
-                        width: '60px',
-                        padding: '8px',
-                        marginBottom: 0,
-                      }}
-                      value={ing.amount}
-                      onChange={(e) => {
-                        const c = [...newRecipe.ingredients];
-                        c[idx].amount = e.target.value;
-                        setNewRecipe({ ...newRecipe, ingredients: c });
-                      }}
-                    />
-                    <span style={{ alignSelf: 'center' }}>{ing.unit}</span>
-                    <button
-                      onClick={() =>
-                        setNewRecipe({
-                          ...newRecipe,
-                          ingredients: newRecipe.ingredients.filter(
-                            (_, i) => i !== idx
-                          ),
-                        })
-                      }
-                      style={{
-                        color: 'red',
-                        border: 'none',
-                        background: 'none',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <button style={btnSuccessFull} onClick={handleSaveRecipe}>
-                {newRecipe.id ? 'Zaktualizuj' : 'Zapisz'}
-              </button>
-              {newRecipe.id && (
-                <button
-                  style={{ ...btnSec, width: '100%', marginTop: '5px' }}
-                  onClick={() =>
+                  onClick={() => {
                     setNewRecipe({
                       id: null,
                       name: '',
@@ -1760,207 +1627,753 @@ export default function App() {
                       steps: [],
                       ingredients: [],
                       is_favorite: false,
-                    })
-                  }
+                    });
+                    setSearchQuery('');
+                    setShowAiPanel(false);
+                    setShowRecipeForm(true);
+                  }}
                 >
-                  Anuluj edycję
+                  + Dodaj nowy przepis
                 </button>
-              )}
-            </div>
 
-            <div style={filterBar}>
-              {['Wszystkie', ...MEAL_TYPES].map((cat) => (
+                <div style={filterBar}>
+                  {['Wszystkie', ...MEAL_TYPES].map((cat) => (
+                    <button
+                      key={cat}
+                      onClick={() =>
+                        setRecipeListCategory(cat === 'Wszystkie' ? '' : cat)
+                      }
+                      style={
+                        recipeListCategory === (cat === 'Wszystkie' ? '' : cat)
+                          ? btnFilterActive
+                          : btnFilter
+                      }
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                {recipes
+                  .filter(
+                    (r) =>
+                      !recipeListCategory || r.category === recipeListCategory
+                  )
+                  .sort((a, b) => b.is_favorite - a.is_favorite)
+                  .map((r) => (
+                    <div key={r.id} style={productRowS}>
+                      <span style={{ fontSize: '13px' }}>
+                        {r.is_favorite && '⭐ '}
+                        <b>{r.name}</b>{' '}
+                        <span
+                          style={{
+                            color: '#059669',
+                            fontWeight: 'bold',
+                            marginLeft: '5px',
+                          }}
+                        >
+                          ({parseFloat(r.total_cost).toFixed(2)} zł)
+                        </span>
+                      </span>
+                      <div style={{ display: 'flex', gap: '10px' }}>
+                        <button
+                          onClick={() =>
+                            handleToggleFavorite(r.id, r.is_favorite)
+                          }
+                          style={{ ...iconBtn, color: '#f59e0b' }}
+                          title="Oznacz/Usuń jako ulubione"
+                        >
+                          {r.is_favorite ? '⭐' : '☆'}
+                        </button>
+                        <button
+                          onClick={() => handleEditRecipeDirectly(r)}
+                          style={iconBtn}
+                          title="Edytuj"
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (
+                              confirm(
+                                'Usunąć przepis z bazy? Zniknie on ze wszystkich dni w kalendarzu.'
+                              )
+                            ) {
+                              await supabase
+                                .from('meal_plan')
+                                .delete()
+                                .eq('recipe_id', r.id);
+                              await supabase
+                                .from('recipe_ingredients')
+                                .delete()
+                                .eq('recipe_id', r.id);
+                              await supabase
+                                .from('recipes')
+                                .delete()
+                                .eq('id', r.id);
+                              fetchData();
+                            }
+                          }}
+                          style={{ ...iconBtn, color: '#ef4444' }}
+                          title="Usuń"
+                        >
+                          🗑️
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </>
+            ) : (
+              <>
                 <button
-                  key={cat}
-                  onClick={() =>
-                    setRecipeListCategory(cat === 'Wszystkie' ? '' : cat)
-                  }
-                  style={
-                    recipeListCategory === (cat === 'Wszystkie' ? '' : cat)
-                      ? btnFilterActive
-                      : btnFilter
-                  }
+                  onClick={() => setShowRecipeForm(false)}
+                  style={{ ...btnSec, marginBottom: '15px' }}
                 >
-                  {cat}
+                  ⬅ Wróć do listy
                 </button>
-              ))}
-            </div>
 
-            {recipes
-              .filter(
-                (r) => !recipeListCategory || r.category === recipeListCategory
-              )
-              .sort((a, b) => b.is_favorite - a.is_favorite)
-              .map((r) => (
-                <div key={r.id} style={productRowS}>
-                  <span style={{ fontSize: '13px' }}>
-                    {r.is_favorite && '⭐ '}
-                    {r.name}
-                  </span>
-                  <div style={{ display: 'flex', gap: '10px' }}>
-                    <button
-                      onClick={() => handleToggleFavorite(r.id, r.is_favorite)}
-                      style={{ ...iconBtn, color: '#f59e0b' }}
-                      title="Oznacz/Usuń jako ulubione"
+                {/* --- AKORDEON: ASYSTENT AI --- */}
+                <div
+                  style={{
+                    ...formBoxS,
+                    background: '#f5f3ff',
+                    borderColor: '#c4b5fd',
+                    marginBottom: '15px',
+                  }}
+                >
+                  <div
+                    onClick={() => setShowAiPanel(!showAiPanel)}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <h4
+                      style={{ margin: 0, color: '#6d28d9', fontSize: '14px' }}
                     >
-                      {r.is_favorite ? '⭐' : '☆'}
-                    </button>
-                    <button
-                      onClick={() => handleEditRecipeDirectly(r)}
-                      style={iconBtn}
-                      title="Edytuj"
-                    >
-                      ✏️
-                    </button>
-                    <button
-                      onClick={async () => {
-                        if (
-                          confirm(
-                            'Usunąć przepis z bazy? Zniknie on ze wszystkich dni w kalendarzu.'
-                          )
-                        ) {
-                          await supabase
-                            .from('meal_plan')
-                            .delete()
-                            .eq('recipe_id', r.id);
-                          await supabase
-                            .from('recipe_ingredients')
-                            .delete()
-                            .eq('recipe_id', r.id);
-                          await supabase
-                            .from('recipes')
-                            .delete()
-                            .eq('id', r.id);
-                          fetchData();
-                        }
+                      ✨ Asystent AI
+                    </h4>
+                    <span style={{ color: '#6d28d9', fontWeight: 'bold' }}>
+                      {showAiPanel ? '▲' : '▼'}
+                    </span>
+                  </div>
+
+                  {showAiPanel && (
+                    <div style={{ marginTop: '15px' }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          gap: '8px',
+                          marginBottom: '10px',
+                        }}
+                      >
+                        <input
+                          style={{
+                            ...inputS,
+                            marginBottom: 0,
+                            flex: 1,
+                            borderColor: '#c4b5fd',
+                          }}
+                          placeholder="Wklej link do przepisu..."
+                          value={aiUrl}
+                          onChange={(e) => setAiUrl(e.target.value)}
+                          disabled={isAiLoading}
+                        />
+                        <button
+                          onClick={handleAiRecipeFromUrl}
+                          style={{
+                            ...btnPrim,
+                            background: '#8b5cf6',
+                            whiteSpace: 'nowrap',
+                          }}
+                          disabled={isAiLoading || !aiUrl}
+                        >
+                          {isAiLoading ? '⏳...' : 'Pobierz'}
+                        </button>
+                      </div>
+
+                      <div
+                        style={{
+                          textAlign: 'center',
+                          color: '#8b5cf6',
+                          fontSize: '12px',
+                          fontWeight: 'bold',
+                          margin: '10px 0',
+                        }}
+                      >
+                        LUB
+                      </div>
+
+                      <label
+                        style={{
+                          ...btnPrim,
+                          display: 'block',
+                          textAlign: 'center',
+                          background: '#8b5cf6',
+                          fontSize: '14px',
+                          padding: '10px',
+                          cursor: 'pointer',
+                          opacity: isAiLoading ? 0.7 : 1,
+                        }}
+                      >
+                        {isAiLoading
+                          ? '⏳ Pracuję...'
+                          : '📷 Wczytaj ze zdjęcia'}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleAiRecipeScan}
+                          style={{ display: 'none' }}
+                          disabled={isAiLoading}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                <div style={formBoxS}>
+                  <div
+                    style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}
+                  >
+                    <input
+                      style={{ ...inputS, marginBottom: 0, flex: 1 }}
+                      placeholder="Nazwa dania"
+                      value={newRecipe.name}
+                      onChange={(e) =>
+                        setNewRecipe({ ...newRecipe, name: e.target.value })
+                      }
+                    />
+                    <select
+                      style={{
+                        ...inputS,
+                        marginBottom: 0,
+                        width: 'auto',
+                        padding: '5px',
                       }}
-                      style={{ ...iconBtn, color: '#ef4444' }}
-                      title="Usuń"
+                      value={newRecipe.category}
+                      onChange={(e) =>
+                        setNewRecipe({ ...newRecipe, category: e.target.value })
+                      }
                     >
-                      🗑️
+                      {MEAL_TYPES.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() =>
+                        setNewRecipe({
+                          ...newRecipe,
+                          is_favorite: !newRecipe.is_favorite,
+                        })
+                      }
+                      style={{ ...iconBtn, fontSize: '24px' }}
+                    >
+                      {newRecipe.is_favorite ? '⭐' : '☆'}
                     </button>
                   </div>
+                  <label style={fileLabelS}>
+                    {newRecipe.image_url
+                      ? '✅ Zdjęcie wybrane'
+                      : '📷 Wybierz zdjęcie'}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleFileUpload}
+                      style={{ display: 'none' }}
+                    />
+                  </label>
+                  <textarea
+                    style={{ ...inputS, minHeight: '80px' }}
+                    placeholder="Opis..."
+                    value={newRecipe.instructions}
+                    onChange={(e) =>
+                      setNewRecipe({
+                        ...newRecipe,
+                        instructions: e.target.value,
+                      })
+                    }
+                  />
+                  {newRecipe.steps.map((s, i) => (
+                    <div
+                      key={i}
+                      style={{ display: 'flex', gap: '5px', marginTop: '5px' }}
+                    >
+                      <div style={stepCircleS}>{i + 1}</div>
+                      <input
+                        style={{ ...inputS, marginBottom: 0 }}
+                        value={s}
+                        onChange={(e) => {
+                          const c = [...newRecipe.steps];
+                          c[i] = e.target.value;
+                          setNewRecipe({ ...newRecipe, steps: c });
+                        }}
+                      />
+                      <button
+                        onClick={() =>
+                          setNewRecipe({
+                            ...newRecipe,
+                            steps: newRecipe.steps.filter(
+                              (_, idx) => idx !== i
+                            ),
+                          })
+                        }
+                        style={btnDelSmallStatic}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    style={{
+                      ...btnSec,
+                      width: '100%',
+                      padding: '8px',
+                      marginTop: '5px',
+                      marginBottom: '15px',
+                    }}
+                    onClick={() =>
+                      setNewRecipe({
+                        ...newRecipe,
+                        steps: [...newRecipe.steps, ''],
+                      })
+                    }
+                  >
+                    + Krok
+                  </button>
+
+                  {/* --- PŁYWAJĄCY SEARCH BAR DLA SKŁADNIKÓW --- */}
+                  <div
+                    ref={searchContainerRef}
+                    style={{ position: 'relative', marginBottom: '15px' }}
+                  >
+                    <input
+                      style={{
+                        ...inputS,
+                        marginBottom: 0,
+                        borderColor: showSearchDropdown ? '#059669' : '#cbd5e1',
+                      }}
+                      placeholder="🔍 Szukaj składnika w bazie..."
+                      value={searchQuery}
+                      onChange={(e) => {
+                        setSearchQuery(e.target.value);
+                        setShowSearchDropdown(true);
+                      }}
+                      onFocus={() => setShowSearchDropdown(true)}
+                    />
+                    {showSearchDropdown && (
+                      <div
+                        style={{
+                          ...searchResultsS,
+                          position: 'absolute',
+                          top: '100%',
+                          left: 0,
+                          right: 0,
+                          zIndex: 1000,
+                          maxHeight: '200px',
+                          overflowY: 'auto',
+                          boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1)',
+                          border: '1px solid #cbd5e1',
+                          marginTop: '5px',
+                          borderRadius: '12px',
+                        }}
+                      >
+                        {products
+                          .filter(
+                            (p) =>
+                              !searchQuery ||
+                              p.name
+                                .toLowerCase()
+                                .includes(searchQuery.toLowerCase())
+                          )
+                          .map((p) => (
+                            <div
+                              key={p.id}
+                              style={{ ...searchItemS, fontSize: '13px' }}
+                              onClick={() => {
+                                setNewRecipe({
+                                  ...newRecipe,
+                                  ingredients: [
+                                    ...newRecipe.ingredients,
+                                    { ...p, amount: 100 },
+                                  ],
+                                });
+                                setSearchQuery('');
+                                setShowSearchDropdown(false);
+                              }}
+                            >
+                              <b>{p.name}</b>{' '}
+                              <span
+                                style={{ color: '#64748b', marginLeft: '5px' }}
+                              >
+                                ({p.unit})
+                              </span>
+                            </div>
+                          ))}
+                        {products.filter(
+                          (p) =>
+                            !searchQuery ||
+                            p.name
+                              .toLowerCase()
+                              .includes(searchQuery.toLowerCase())
+                        ).length === 0 && (
+                          <div
+                            style={{
+                              padding: '15px',
+                              color: '#64748b',
+                              fontSize: '13px',
+                              textAlign: 'center',
+                            }}
+                          >
+                            Brak wyników. Zmień nazwę lub dodaj jako nowy
+                            produkt po wybraniu.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* --- LISTA SKŁADNIKÓW --- */}
+                  {newRecipe.ingredients.map((ing, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        ...ingRowS,
+                        flexDirection: 'column',
+                        alignItems: 'stretch',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          width: '100%',
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: '13px',
+                            flex: 1,
+                            color: ing.id ? '#1e293b' : '#ef4444',
+                            fontWeight: ing.id ? 'normal' : 'bold',
+                          }}
+                        >
+                          {ing.name}
+                        </span>
+                        <div style={{ display: 'flex', gap: '5px' }}>
+                          <input
+                            type="number"
+                            style={{
+                              ...inputS,
+                              width: '60px',
+                              padding: '8px',
+                              marginBottom: 0,
+                            }}
+                            value={ing.amount}
+                            onChange={(e) => {
+                              const c = [...newRecipe.ingredients];
+                              c[idx].amount = e.target.value;
+                              setNewRecipe({ ...newRecipe, ingredients: c });
+                            }}
+                          />
+                          <span
+                            style={{
+                              alignSelf: 'center',
+                              fontSize: '13px',
+                              width: '30px',
+                            }}
+                          >
+                            {ing.unit}
+                          </span>
+                          <button
+                            onClick={() =>
+                              setNewRecipe({
+                                ...newRecipe,
+                                ingredients: newRecipe.ingredients.filter(
+                                  (_, i) => i !== idx
+                                ),
+                              })
+                            }
+                            style={{
+                              color: 'red',
+                              border: 'none',
+                              background: 'none',
+                              cursor: 'pointer',
+                              fontSize: '16px',
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* KOMUNIKAT BRAKU W BAZIE I SZYBKIE DODAWANIE */}
+                      {!ing.id && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: '5px',
+                            marginTop: '8px',
+                            paddingLeft: '10px',
+                            borderLeft: '2px solid #ef4444',
+                          }}
+                        >
+                          <select
+                            style={{
+                              ...inputS,
+                              padding: '6px',
+                              fontSize: '12px',
+                              marginBottom: 0,
+                              flex: 1,
+                              borderColor: '#fca5a5',
+                              background: '#fff1f2',
+                              color: '#991b1b',
+                            }}
+                            onChange={async (e) => {
+                              const val = e.target.value;
+                              if (val === 'ADD_NEW') {
+                                let cleanName = ing.name
+                                  .replace('⚠️ ', '')
+                                  .trim();
+                                const finalName = window.prompt(
+                                  'Podaj nazwę dla nowego produktu:',
+                                  cleanName
+                                );
+                                if (!finalName) {
+                                  e.target.value = '';
+                                  return;
+                                }
+
+                                const newProduct = {
+                                  name: finalName,
+                                  price_per_unit: 0,
+                                  unit: ing.unit,
+                                  last_input_quantity: 100,
+                                };
+                                const { data } = await supabase
+                                  .from('products')
+                                  .insert([newProduct])
+                                  .select()
+                                  .single();
+                                if (data) {
+                                  setProducts((prev) => [...prev, data]);
+                                  const newIngs = [...newRecipe.ingredients];
+                                  newIngs[idx] = {
+                                    ...data,
+                                    amount: ing.amount,
+                                  };
+                                  setNewRecipe({
+                                    ...newRecipe,
+                                    ingredients: newIngs,
+                                  });
+                                }
+                              } else if (val !== '') {
+                                const selectedDbProd = products.find(
+                                  (p) => p.id === val
+                                );
+                                if (selectedDbProd) {
+                                  const newIngs = [...newRecipe.ingredients];
+                                  newIngs[idx] = {
+                                    ...selectedDbProd,
+                                    amount: ing.amount,
+                                  };
+                                  setNewRecipe({
+                                    ...newRecipe,
+                                    ingredients: newIngs,
+                                  });
+                                }
+                              }
+                            }}
+                            value=""
+                          >
+                            <option value="" disabled>
+                              Wybierz akcję (brak w bazie)...
+                            </option>
+                            <option value="ADD_NEW">
+                              ➕ Dodaj "{ing.name.replace('⚠️ ', '')}" do bazy
+                            </option>
+                            <optgroup label="Lub powiąż z istniejącym:">
+                              {products.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  🔗 {p.name}
+                                </option>
+                              ))}
+                            </optgroup>
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  <button style={btnSuccessFull} onClick={handleSaveRecipe}>
+                    {newRecipe.id ? 'Zaktualizuj' : 'Zapisz'}
+                  </button>
                 </div>
-              ))}
+              </>
+            )}
           </div>
         </Modal>
       )}
 
+      {/* MODAL: Baza Produktów (Lista + Formularz) */}
       {activeModal === 'product' && (
         <Modal
           title="📦 Baza Produktów"
-          onClose={() => setActiveModal(null)}
+          onClose={() => {
+            setActiveModal(null);
+            setShowProductForm(false);
+          }}
           isMobile={isMobile}
           isLandscape={isLandscape}
         >
-          <div style={formBoxS}>
-            <input
-              style={inputS}
-              placeholder="Nazwa produktu"
-              value={newProd.name}
-              onChange={(e) => setNewProd({ ...newProd, name: e.target.value })}
-            />
-            <div style={{ display: 'flex', gap: '5px' }}>
-              <input
-                style={{ ...inputS, marginBottom: 0 }}
-                type="number"
-                placeholder="Cena"
-                value={newProd.price}
-                onChange={(e) =>
-                  setNewProd({ ...newProd, price: e.target.value })
-                }
-              />
-              <input
-                style={{ ...inputS, marginBottom: 0 }}
-                type="number"
-                placeholder="Ilość"
-                value={newProd.amount}
-                onChange={(e) =>
-                  setNewProd({ ...newProd, amount: e.target.value })
-                }
-              />
-              <select
-                style={{ ...inputS, marginBottom: 0 }}
-                value={newProd.unit}
-                onChange={(e) =>
-                  setNewProd({ ...newProd, unit: e.target.value })
-                }
-              >
-                <option value="g">g</option>
-                <option value="ml">ml</option>
-                <option value="szt">szt</option>
-              </select>
-            </div>
-            <button style={btnSuccessFull} onClick={handleSaveProduct}>
-              {newProd.id ? 'Zaktualizuj' : 'Zapisz'}
-            </button>
-            {newProd.id && (
-              <button
-                style={{ ...btnSec, width: '100%', marginTop: '5px' }}
-                onClick={() =>
-                  setNewProd({
-                    id: null,
-                    name: '',
-                    price: '',
-                    amount: '',
-                    unit: 'g',
-                  })
-                }
-              >
-                Anuluj edycję
-              </button>
-            )}
-          </div>
           <div
             style={{
-              maxHeight: isMobile && isLandscape ? '85vh' : '300px',
+              maxHeight: isMobile && isLandscape ? '85vh' : '70vh',
               overflowY: 'auto',
+              paddingRight: '5px',
+              paddingBottom: '20px',
             }}
           >
-            {products.map((p) => (
-              <div key={p.id} style={productRowS}>
-                <div style={{ fontSize: '13px' }}>
-                  <b>{p.name}</b>
+            {!showProductForm ? (
+              <>
+                <button
+                  style={{
+                    ...btnSuccessFull,
+                    marginBottom: '20px',
+                    fontSize: '16px',
+                    padding: '16px',
+                  }}
+                  onClick={() => {
+                    setNewProd({
+                      id: null,
+                      name: '',
+                      price: '',
+                      amount: '',
+                      unit: 'g',
+                    });
+                    setShowProductForm(true);
+                  }}
+                >
+                  + Dodaj nowy produkt
+                </button>
+
+                <div>
+                  {products.map((p) => (
+                    <div key={p.id} style={productRowS}>
+                      <div style={{ fontSize: '13px' }}>
+                        <b>{p.name}</b>{' '}
+                        <span style={{ color: '#64748b', marginLeft: '5px' }}>
+                          (
+                          {parseFloat(
+                            p.price_per_unit * p.last_input_quantity
+                          ).toFixed(2)}{' '}
+                          zł / {p.last_input_quantity}
+                          {p.unit})
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '10px' }}>
+                        <button
+                          onClick={() => {
+                            setNewProd({
+                              id: p.id,
+                              name: p.name,
+                              price: (
+                                p.price_per_unit * p.last_input_quantity
+                              ).toFixed(2),
+                              amount: p.last_input_quantity,
+                              unit: p.unit,
+                            });
+                            setShowProductForm(true);
+                          }}
+                          style={iconBtn}
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (
+                              confirm(
+                                'Usunąć produkt z bazy? Zostanie on usunięty ze wszystkich Twoich przepisów.'
+                              )
+                            ) {
+                              await supabase
+                                .from('recipe_ingredients')
+                                .delete()
+                                .eq('product_id', p.id);
+                              await supabase
+                                .from('products')
+                                .delete()
+                                .eq('id', p.id);
+                              fetchData();
+                            }
+                          }}
+                          style={{ ...iconBtn, color: '#ef4444' }}
+                        >
+                          🗑️
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div style={{ display: 'flex', gap: '10px' }}>
-                  <button
-                    onClick={() => {
-                      setNewProd({
-                        id: p.id,
-                        name: p.name,
-                        price: (
-                          p.price_per_unit * p.last_input_quantity
-                        ).toFixed(2),
-                        amount: p.last_input_quantity,
-                        unit: p.unit,
-                      });
-                    }}
-                    style={iconBtn}
-                  >
-                    ✏️
-                  </button>
-                  <button
-                    onClick={async () => {
-                      if (
-                        confirm(
-                          'Usunąć produkt z bazy? Zostanie on usunięty ze wszystkich Twoich przepisów.'
-                        )
-                      ) {
-                        await supabase
-                          .from('recipe_ingredients')
-                          .delete()
-                          .eq('product_id', p.id);
-                        await supabase.from('products').delete().eq('id', p.id);
-                        fetchData();
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setShowProductForm(false)}
+                  style={{ ...btnSec, marginBottom: '15px' }}
+                >
+                  ⬅ Wróć do listy
+                </button>
+                <div style={formBoxS}>
+                  <input
+                    style={inputS}
+                    placeholder="Nazwa produktu"
+                    value={newProd.name}
+                    onChange={(e) =>
+                      setNewProd({ ...newProd, name: e.target.value })
+                    }
+                  />
+                  <div style={{ display: 'flex', gap: '5px' }}>
+                    <input
+                      style={{ ...inputS, marginBottom: 0 }}
+                      type="number"
+                      placeholder="Cena"
+                      value={newProd.price}
+                      onChange={(e) =>
+                        setNewProd({ ...newProd, price: e.target.value })
                       }
-                    }}
-                    style={{ ...iconBtn, color: '#ef4444' }}
-                  >
-                    🗑️
+                    />
+                    <input
+                      style={{ ...inputS, marginBottom: 0 }}
+                      type="number"
+                      placeholder="Ilość"
+                      value={newProd.amount}
+                      onChange={(e) =>
+                        setNewProd({ ...newProd, amount: e.target.value })
+                      }
+                    />
+                    <select
+                      style={{ ...inputS, marginBottom: 0 }}
+                      value={newProd.unit}
+                      onChange={(e) =>
+                        setNewProd({ ...newProd, unit: e.target.value })
+                      }
+                    >
+                      <option value="g">g</option>
+                      <option value="ml">ml</option>
+                      <option value="szt">szt</option>
+                    </select>
+                  </div>
+                  <button style={btnSuccessFull} onClick={handleSaveProduct}>
+                    {newProd.id ? 'Zaktualizuj' : 'Zapisz'}
                   </button>
                 </div>
-              </div>
-            ))}
+              </>
+            )}
           </div>
         </Modal>
       )}
