@@ -1,3 +1,7 @@
+// const SUPABASE_URL = 'TWÓJ_URL';
+// const SUPABASE_ANON_KEY = 'TWÓJ_KLUCZ';
+// const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -100,10 +104,12 @@ export default function App() {
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [isTtsActive, setIsTtsActive] = useState(false); 
   const [lastHeard, setLastHeard] = useState(''); 
-  const [repeatTrigger, setRepeatTrigger] = useState(0); // <-- Wyzwalacz powtarzania
+  const [repeatTrigger, setRepeatTrigger] = useState(0); 
   
   const recognitionRef = useRef(null);
   const isVoiceActiveRef = useRef(isVoiceActive);
+  const isTtsActiveRef = useRef(isTtsActive);
+  const isProcessingCmdRef = useRef(false); // Blokada na czas wykonywania komendy
   const stepsLengthRef = useRef(0); 
 
   const [isAiLoading, setIsAiLoading] = useState(false); 
@@ -178,7 +184,12 @@ export default function App() {
     }
   }, [viewingRecipe]);
 
-  // --- POPRAWIONY LEKTOR Z OBSŁUGĄ POWTARZANIA ---
+  // Utrzymywanie refa dla TTS
+  useEffect(() => {
+    isTtsActiveRef.current = isTtsActive;
+  }, [isTtsActive]);
+
+  // --- POPRAWIONY LEKTOR Z RESETOWANIEM MIKROFONU PO ZAKOŃCZENIU CZYTANIA ---
   useEffect(() => {
     if (activeModal === 'cooking-mode' && isTtsActive && viewingRecipe?.steps) {
       window.speechSynthesis.cancel(); 
@@ -190,13 +201,36 @@ export default function App() {
         utterance.lang = 'pl-PL';
         utterance.rate = 1.0; 
         
+        // Po zakończeniu czytania odblokuj nasłuchiwanie
+        utterance.onend = () => {
+          isProcessingCmdRef.current = false;
+          if (isVoiceActiveRef.current && recognitionRef.current) {
+            try { recognitionRef.current.start(); } catch(e) {}
+          }
+        };
+
+        // Zabezpieczenie na wypadek błędu czytania
+        utterance.onerror = () => {
+          isProcessingCmdRef.current = false;
+          if (isVoiceActiveRef.current && recognitionRef.current) {
+            try { recognitionRef.current.start(); } catch(e) {}
+          }
+        };
+        
         setTimeout(() => {
           window.speechSynthesis.speak(utterance);
         }, 150);
+      } else {
+        // Jeśli nie ma tekstu, po prostu odblokuj mikrofon
+        isProcessingCmdRef.current = false;
+        if (isVoiceActiveRef.current && recognitionRef.current) {
+          try { recognitionRef.current.start(); } catch(e) {}
+        }
       }
     }
-  }, [cookingStep, activeModal, isTtsActive, viewingRecipe, repeatTrigger]); // Dodano repeatTrigger
+  }, [cookingStep, activeModal, isTtsActive, viewingRecipe, repeatTrigger]);
 
+  // --- NOWY MECHANIZM PAUZOWANIA I WZNAWIANIA NASŁUCHIWANIA ---
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -206,10 +240,12 @@ export default function App() {
 
     const recognition = new SpeechRecognition();
     recognition.lang = 'pl-PL';
-    recognition.continuous = false; 
+    recognition.continuous = false; // Rozpoznaje i kończy
     recognition.interimResults = false; 
 
     recognition.onresult = (event) => {
+      if (isProcessingCmdRef.current) return; // Zapobiegaj dublowaniu
+
       const lastResult = event.results[event.results.length - 1];
       let transcript = lastResult[0].transcript.toLowerCase().trim();
       transcript = transcript.replace(/[.,!?]/g, '');
@@ -217,34 +253,52 @@ export default function App() {
       
       const matchForward = /(dalej|następny|następna|kolejny|kolejna)/i.test(transcript);
       const matchBackward = /(wstecz|poprzedni|poprzednia|cofnij|wróć)/i.test(transcript);
-      const matchRepeat = /(powtórz|powtórz to|jeszcze raz|czytaj)/i.test(transcript); // <-- Nowa komenda
+      const matchRepeat = /(powtórz|powtórz to|jeszcze raz|czytaj)/i.test(transcript); 
       const matchClose = /(zamknij|koniec|zakończ)/i.test(transcript);
 
-      if (matchForward) {
-        setCookingStep(prev => {
-          const maxStep = Math.max(0, stepsLengthRef.current - 1);
-          return Math.min(prev + 1, maxStep);
-        });
-      } else if (matchBackward) {
-        setCookingStep(prev => Math.max(prev - 1, 0));
-      } else if (matchRepeat) {
-        setRepeatTrigger(prev => prev + 1); // <-- Odpala lektora od nowa
-      } else if (matchClose) {
-        setIsVoiceActive(false);
-        window.speechSynthesis.cancel();
-        setActiveModal('view-recipe');
+      if (matchForward || matchBackward || matchRepeat || matchClose) {
+        isProcessingCmdRef.current = true; // Blokada
+        recognition.stop(); // Wymuszamy zatrzymanie na czas przetwarzania
+
+        if (matchForward) {
+          setCookingStep(prev => Math.min(prev + 1, Math.max(0, stepsLengthRef.current - 1)));
+        } else if (matchBackward) {
+          setCookingStep(prev => Math.max(prev - 1, 0));
+        } else if (matchRepeat) {
+          setRepeatTrigger(prev => prev + 1); 
+        } else if (matchClose) {
+          setIsVoiceActive(false);
+          window.speechSynthesis.cancel();
+          setActiveModal('view-recipe');
+          isProcessingCmdRef.current = false;
+          return;
+        }
+
+        // Jeśli lektor jest WYŁĄCZONY, odczekaj chwile i wznów nasłuchiwanie
+        if (!isTtsActiveRef.current) {
+          setTimeout(() => {
+            isProcessingCmdRef.current = false;
+            if (isVoiceActiveRef.current && recognitionRef.current) {
+              try { recognitionRef.current.start(); } catch(e) {}
+            }
+          }, 1000); // 1 sekunda przerwy między komendami
+        }
       }
     };
 
     recognition.onerror = (event) => {
-      if (event.error === 'not-allowed') setIsVoiceActive(false);
+      if (event.error === 'not-allowed') {
+        setIsVoiceActive(false);
+        isProcessingCmdRef.current = false;
+      }
     };
 
     recognition.onend = () => {
-      if (isVoiceActiveRef.current) {
+      // Automatyczny restart TYLKO jeśli tryb jest włączony i NIE przetwarzamy akurat komendy
+      if (isVoiceActiveRef.current && !isProcessingCmdRef.current) {
         setTimeout(() => {
-          try { recognition.start(); } catch(e) {}
-        }, 100);
+          try { recognitionRef.current.start(); } catch(e) {}
+        }, 150);
       }
     };
     
@@ -261,11 +315,17 @@ export default function App() {
 
   useEffect(() => {
     isVoiceActiveRef.current = isVoiceActive;
-    if (isVoiceActive && recognitionRef.current) {
-      setLastHeard('');
-      try { recognitionRef.current.start(); } catch(e) {}
-    } else if (!isVoiceActive && recognitionRef.current) {
-      recognitionRef.current.stop();
+    if (isVoiceActive) {
+      if (!isProcessingCmdRef.current && recognitionRef.current) {
+        setLastHeard('');
+        try { recognitionRef.current.start(); } catch(e) {}
+      }
+    } else {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      window.speechSynthesis.cancel();
+      isProcessingCmdRef.current = false;
     }
   }, [isVoiceActive]);
 
@@ -455,7 +515,7 @@ export default function App() {
     const file = e.target.files[0];
     if (!file) return;
     if (!GEMINI_API_KEY) {
-      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do GitHub Secrets i przebuduj apkę.");
+      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do pliku .env");
       return;
     }
 
@@ -507,7 +567,7 @@ export default function App() {
   const handleAiRecipeFromUrl = async () => {
     if (!aiUrl) return;
     if (!GEMINI_API_KEY) {
-      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do GitHub Secrets i przebuduj apkę.");
+      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do pliku .env");
       return;
     }
 
