@@ -9,6 +9,8 @@ __pycache__/
 # C extensions
 *.so
 notes.md
+node_modules/
+package-lock.json
 
 # Distribution / packaging
 .Python

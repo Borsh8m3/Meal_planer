@@ -1,7 +1,12 @@
+import 'regenerator-runtime/runtime'; // Wymagane przez react-speech-recognition
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
+import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
 
-const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL || '',
+  import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+);
 
 // Klucz do Google Gemini AI
 const GEMINI_API_KEY = (import.meta.env.VITE_GEMINI_API_KEY || '').trim();
@@ -97,13 +102,11 @@ export default function App() {
 
   // --- STANY DLA TRYBU GOTOWANIA ---
   const [cookingStep, setCookingStep] = useState(0);
-  const [isVoiceActive, setIsVoiceActive] = useState(false); // Główny włącznik użytkownika
-  const [isMicPaused, setIsMicPaused] = useState(false);     // Wirtualne kliknięcie (pauza aplikacji)
-  const [isTtsActive, setIsTtsActive] = useState(false);     // Lektor
-  const [lastHeard, setLastHeard] = useState(''); 
+  const [isVoiceActive, setIsVoiceActive] = useState(false); 
+  const [isMicPaused, setIsMicPaused] = useState(false);     
+  const [isTtsActive, setIsTtsActive] = useState(false);     
   const [repeatTrigger, setRepeatTrigger] = useState(0); 
   
-  const recognitionRef = useRef(null);
   const isVoiceActiveRef = useRef(isVoiceActive);
   const isMicPausedRef = useRef(isMicPaused);
   const isTtsActiveRef = useRef(isTtsActive);
@@ -127,11 +130,82 @@ export default function App() {
     id: null, name: '', price: '', amount: '', unit: 'g',
   });
   const [newRecipe, setNewRecipe] = useState({
-    id: null, name: '', category: 'Obiad', instructions: '', image_url: '', steps: [], ingredients: [], is_favorite: false,
+    id: null, name: '', category: 'Obiad', instructions: '', image_url: '', steps: [], ingredients: [], is_favorite: false, portions: 1,
   });
   const [searchQuery, setSearchQuery] = useState('');
 
   const handleLogout = useCallback(() => supabase.auth.signOut(), []);
+
+  // --- ZARZĄDZANIE MOWĄ Z REACT-SPEECH-RECOGNITION ---
+  const handleMicPauseAndAction = useCallback(() => {
+    setIsMicPaused(true);
+    SpeechRecognition.stopListening();
+    
+    // Jeśli lektor wyłączony -> sami zdejmujemy pauzę po sekundzie
+    if (!isTtsActiveRef.current) {
+      setTimeout(() => {
+        setIsMicPaused(false);
+        if (isVoiceActiveRef.current) {
+          SpeechRecognition.startListening({ continuous: true, language: 'pl-PL' });
+        }
+      }, 1500);
+    }
+  }, []);
+
+  const commands = useMemo(() => [
+    {
+      command: /(dalej|następny|następna|kolejny|kolejna)/i,
+      callback: () => {
+        setCookingStep(prev => {
+          const nextStep = Math.min(prev + 1, Math.max(0, stepsLengthRef.current - 1));
+          console.log(`[Głos] Komenda: DALEJ. Krok zmieniony na: ${nextStep}`);
+          return nextStep;
+        });
+        handleMicPauseAndAction();
+      },
+      matchInterim: true
+    },
+    {
+      command: /(wstecz|poprzedni|poprzednia|cofnij|wróć)/i,
+      callback: () => {
+        setCookingStep(prev => {
+          const prevStep = Math.max(prev - 1, 0);
+          console.log(`[Głos] Komenda: WSTECZ. Krok zmieniony na: ${prevStep}`);
+          return prevStep;
+        });
+        handleMicPauseAndAction();
+      },
+      matchInterim: true
+    },
+    {
+      command: /(powtórz|powtórz to|jeszcze raz|czytaj)/i,
+      callback: () => {
+        console.log(`[Głos] Komenda: POWTÓRZ.`);
+        setRepeatTrigger(prev => prev + 1);
+        handleMicPauseAndAction();
+      },
+      matchInterim: true
+    },
+    {
+      command: /(zamknij|koniec|zakończ)/i,
+      callback: () => {
+        console.log(`[Głos] Komenda: ZAKOŃCZ.`);
+        setIsVoiceActive(false);
+        setIsMicPaused(false);
+        window.speechSynthesis.cancel();
+        SpeechRecognition.stopListening();
+        setActiveModal('view-recipe');
+      },
+      matchInterim: true
+    }
+  ], [handleMicPauseAndAction]);
+
+  const { transcript, listening, resetTranscript, browserSupportsSpeechRecognition } = useSpeechRecognition({ commands });
+
+  // Czyszczenie transkryptu przy aktywacji pauzy
+  useEffect(() => {
+    if (isMicPaused) resetTranscript();
+  }, [isMicPaused, resetTranscript]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -190,7 +264,8 @@ export default function App() {
   useEffect(() => {
     if (activeModal === 'cooking-mode' && isTtsActive && viewingRecipe?.steps) {
       window.speechSynthesis.cancel(); 
-      setIsMicPaused(true); // Wyłącza mikrofon, żeby nie słyszał samego siebie
+      setIsMicPaused(true); 
+      SpeechRecognition.stopListening();
       
       const stepText = viewingRecipe.steps[cookingStep];
       if (stepText) {
@@ -200,111 +275,45 @@ export default function App() {
         utterance.rate = 1.0; 
         
         // Zdejmuje pauzę mikrofonu, kiedy skończy mówić
-        utterance.onend = () => setIsMicPaused(false);
-        utterance.onerror = () => setIsMicPaused(false);
+        utterance.onend = () => {
+          setIsMicPaused(false);
+          if (isVoiceActiveRef.current) {
+            SpeechRecognition.startListening({ continuous: true, language: 'pl-PL' });
+          }
+        };
+        utterance.onerror = utterance.onend;
         
         setTimeout(() => {
           window.speechSynthesis.speak(utterance);
         }, 150);
       } else {
         setIsMicPaused(false);
+        if (isVoiceActiveRef.current) {
+          SpeechRecognition.startListening({ continuous: true, language: 'pl-PL' });
+        }
       }
     }
   }, [cookingStep, activeModal, isTtsActive, viewingRecipe, repeatTrigger]);
 
-  // --- EFEKT: INICJALIZACJA ROZPOZNAWANIA MOWY (Tylko raz) ---
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      console.warn("Przeglądarka nie obsługuje rozpoznawania mowy.");
+  // --- WŁĄCZANIE / WYŁĄCZANIE MIKROFONU ---
+  const toggleVoiceMode = () => {
+    if (!browserSupportsSpeechRecognition) {
+      alert("Twoja przeglądarka nie wspiera wbudowanego rozpoznawania mowy.");
       return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'pl-PL';
-    recognition.continuous = false; // "Walkie-Talkie" mode
-    recognition.interimResults = false; 
-
-    recognition.onresult = (event) => {
-      const lastResult = event.results[event.results.length - 1];
-      let transcript = lastResult[0].transcript.toLowerCase().trim();
-      transcript = transcript.replace(/[.,!?]/g, '');
-      setLastHeard(transcript);
-      
-      const matchForward = /(dalej|następny|następna|kolejny|kolejna)/i.test(transcript);
-      const matchBackward = /(wstecz|poprzedni|poprzednia|cofnij|wróć)/i.test(transcript);
-      const matchRepeat = /(powtórz|powtórz to|jeszcze raz|czytaj)/i.test(transcript); 
-      const matchClose = /(zamknij|koniec|zakończ)/i.test(transcript);
-
-      if (matchForward || matchBackward || matchRepeat || matchClose) {
-        setIsMicPaused(true); // "Wirtualne odkliknięcie"
-        
-        if (matchForward) {
-          setCookingStep(prev => Math.min(prev + 1, Math.max(0, stepsLengthRef.current - 1)));
-        } else if (matchBackward) {
-          setCookingStep(prev => Math.max(prev - 1, 0));
-        } else if (matchRepeat) {
-          setRepeatTrigger(prev => prev + 1); 
-        } else if (matchClose) {
-          setIsVoiceActive(false);
-          setIsMicPaused(false);
-          window.speechSynthesis.cancel();
-          setActiveModal('view-recipe');
-          return;
-        }
-
-        // Jeśli lektor nie czyta (jest wyłączony), odklikujemy mikrofon z powrotem sami
-        if (!isTtsActiveRef.current) {
-          setTimeout(() => {
-            setIsMicPaused(false); // "Wirtualne zakliknięcie z powrotem"
-          }, 1500);
-        }
-      }
-    };
-
-    recognition.onerror = (event) => {
-      if (event.error === 'not-allowed') {
-        setIsVoiceActive(false);
-        setIsMicPaused(false);
-      }
-    };
-
-    recognition.onend = () => {
-      // Mikrofon zgasł. Odpalamy ponownie, TYLKO jeśli użytkownik chce i nie jesteśmy zapauzowani!
-      if (isVoiceActiveRef.current && !isMicPausedRef.current) {
-        setTimeout(() => {
-          try { recognitionRef.current.start(); } catch(e) {}
-        }, 150);
-      }
-    };
-    
-    recognitionRef.current = recognition;
-
-    return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.onend = null; 
-        recognitionRef.current.stop();
-      }
+    if (isVoiceActive) {
+      setIsVoiceActive(false);
+      setIsMicPaused(false);
+      SpeechRecognition.stopListening();
       window.speechSynthesis.cancel();
-    };
-  }, []);
-
-  // --- EFEKT: WŁĄCZ/WYŁĄCZ (Na podstawie stanu `isVoiceActive` i `isMicPaused`) ---
-  useEffect(() => {
-    if (isVoiceActive && !isMicPaused) {
-      // Wszystko zielone światło -> odpal mikrofon
-      setLastHeard('');
-      try { recognitionRef.current?.start(); } catch(e) {}
     } else {
-      // Zatrzymane ręcznie LUB trwa wirtualna pauza -> ubij mikrofon
-      try { recognitionRef.current?.stop(); } catch(e) {}
+      setIsVoiceActive(true);
+      setIsMicPaused(false);
+      resetTranscript();
+      SpeechRecognition.startListening({ continuous: true, language: 'pl-PL' });
     }
-
-    if (!isVoiceActive) {
-      window.speechSynthesis.cancel();
-    }
-  }, [isVoiceActive, isMicPaused]);
-
+  };
 
   async function fetchData() {
     const { data: prods } = await supabase.from('products').select('*').order('name');
@@ -477,7 +486,8 @@ export default function App() {
       name: aiRecipe.name || prev.name || '',
       instructions: aiRecipe.instructions || prev.instructions || '',
       steps: aiRecipe.steps || prev.steps || [],
-      ingredients: [...prev.ingredients, ...mappedIngredients], 
+      ingredients: [...prev.ingredients, ...mappedIngredients],
+      portions: aiRecipe.portions || prev.portions || 1,
     }));
   };
 
@@ -485,7 +495,7 @@ export default function App() {
     const file = e.target.files[0];
     if (!file) return;
     if (!GEMINI_API_KEY) {
-      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do GitHub Secrets i przebuduj apkę.");
+      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do pliku .env");
       return;
     }
 
@@ -502,13 +512,14 @@ export default function App() {
       {
         "name": "Nazwa dania",
         "instructions": "Krótki opis, wstęp lub notatki do przepisu",
+        "portions": 2,
         "steps": ["krok 1", "krok 2", "krok 3"],
         "ingredients": [
           {"name": "Składnik 1", "amount": 100, "unit": "g"}
         ]
       }`;
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -537,7 +548,7 @@ export default function App() {
   const handleAiRecipeFromUrl = async () => {
     if (!aiUrl) return;
     if (!GEMINI_API_KEY) {
-      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do GitHub Secrets i przebuduj apkę.");
+      alert("Brak klucza API! Dodaj VITE_GEMINI_API_KEY do pliku .env");
       return;
     }
 
@@ -547,13 +558,14 @@ export default function App() {
       {
         "name": "Nazwa dania",
         "instructions": "Krótki opis, wstęp lub notatki do przepisu",
+        "portions": 2,
         "steps": ["krok 1", "krok 2", "krok 3"],
         "ingredients": [
           {"name": "Składnik 1", "amount": 100, "unit": "g"}
         ]
       }`;
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.0-flash-preview:generateContent?key=${GEMINI_API_KEY}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -584,13 +596,17 @@ export default function App() {
     if (!newRecipe.name) return;
 
     const validIngredients = newRecipe.ingredients.filter(ing => ing.id || ing.product_id);
-    const calc = (ing) => parseFloat(ing.price_per_unit || ing.products?.price_per_unit || 0) * parseFloat(ing.amount || 0);
+    const calc = (ing) => {
+      const pricePU = ing.price_per_unit ?? ing.products?.price_per_unit ?? 0;
+      return parseFloat(pricePU) * parseFloat(ing.amount || 0);
+    };
     const tCost = validIngredients.reduce((s, i) => s + calc(i), 0).toFixed(2);
     
     const rData = {
       name: newRecipe.name, category: newRecipe.category, total_cost: tCost,
       instructions: newRecipe.instructions, steps: newRecipe.steps,
       image_url: newRecipe.image_url, is_favorite: newRecipe.is_favorite,
+      portions: newRecipe.portions || 1,
     };
     
     let rId = newRecipe.id;
@@ -607,7 +623,7 @@ export default function App() {
     }));
     await supabase.from('recipe_ingredients').insert(ings);
     
-    setNewRecipe({ id: null, name: '', category: 'Obiad', instructions: '', image_url: '', steps: [], ingredients: [], is_favorite: false });
+    setNewRecipe({ id: null, name: '', category: 'Obiad', instructions: '', image_url: '', steps: [], ingredients: [], is_favorite: false, portions: 1 });
     setShowRecipeForm(false); 
     fetchData();
   };
@@ -627,6 +643,7 @@ export default function App() {
     if (!fullRecipe) return;
     setNewRecipe({
       ...fullRecipe,
+      portions: fullRecipe.portions || 1,
       ingredients: (fullRecipe.recipe_ingredients || []).map((ri) => ({
         ...ri.products, amount: ri.amount, product_id: ri.product_id,
       })),
@@ -1028,7 +1045,7 @@ export default function App() {
                 <button
                   style={{ ...btnSuccessFull, marginBottom: '20px', fontSize: '16px', padding: '16px' }}
                   onClick={() => {
-                    setNewRecipe({ id: null, name: '', category: 'Obiad', instructions: '', image_url: '', steps: [], ingredients: [], is_favorite: false });
+                    setNewRecipe({ id: null, name: '', category: 'Obiad', instructions: '', image_url: '', steps: [], ingredients: [], is_favorite: false, portions: 1 });
                     setSearchQuery('');
                     setShowAiPanel(false);
                     setShowRecipeForm(true);
@@ -1106,13 +1123,29 @@ export default function App() {
                 </div>
 
                 <div style={formBoxS}>
-                  <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+                  {/* --- NOWY UKŁAD Z PORCJAMI --- */}
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
                     <input style={{ ...inputS, marginBottom: 0, flex: 1 }} placeholder="Nazwa dania" value={newRecipe.name} onChange={(e) => setNewRecipe({ ...newRecipe, name: e.target.value })} />
-                    <select style={{ ...inputS, marginBottom: 0, width: 'auto', padding: '5px' }} value={newRecipe.category} onChange={(e) => setNewRecipe({ ...newRecipe, category: e.target.value })}>
-                      {MEAL_TYPES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                    </select>
                     <button onClick={() => setNewRecipe({ ...newRecipe, is_favorite: !newRecipe.is_favorite })} style={{ ...iconBtn, fontSize: '24px' }}>{newRecipe.is_favorite ? '⭐' : '☆'}</button>
                   </div>
+
+                  <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', alignItems: 'center' }}>
+                    <select style={{ ...inputS, marginBottom: 0, flex: 1, padding: '10px' }} value={newRecipe.category} onChange={(e) => setNewRecipe({ ...newRecipe, category: e.target.value })}>
+                      {MEAL_TYPES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    </select>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+                      <span style={{ fontSize: '13px', color: '#475569', fontWeight: 'bold' }}>Porcje:</span>
+                      <input 
+                        type="number" 
+                        min="1"
+                        style={{ ...inputS, marginBottom: 0, padding: '10px', textAlign: 'center' }} 
+                        value={newRecipe.portions} 
+                        onChange={(e) => setNewRecipe({ ...newRecipe, portions: parseInt(e.target.value) || 1 })} 
+                      />
+                    </div>
+                  </div>
+                  {/* --------------------------- */}
+
                   <label style={fileLabelS}>{newRecipe.image_url ? '✅ Zdjęcie wybrane' : '📷 Wybierz zdjęcie'}<input type="file" accept="image/*" onChange={handleFileUpload} style={{ display: 'none' }} /></label>
                   <textarea style={{...inputS, minHeight: '80px'}} placeholder="Opis..." value={newRecipe.instructions} onChange={(e) => setNewRecipe({ ...newRecipe, instructions: e.target.value })} />
                   {newRecipe.steps.map((s, i) => (
@@ -1154,13 +1187,18 @@ export default function App() {
                   </div>
 
                   {/* --- LISTA SKŁADNIKÓW --- */}
-                  {newRecipe.ingredients.map((ing, idx) => (
+                  {newRecipe.ingredients.map((ing, idx) => {
+                    const pricePU = ing.price_per_unit ?? ing.products?.price_per_unit ?? 0;
+                    const calculatedCost = ing.id ? (parseFloat(pricePU) * parseFloat(ing.amount || 0)).toFixed(2) : '0.00';
+                    
+                    return (
                     <div key={idx} style={{...ingRowS, flexDirection: 'column', alignItems: 'stretch'}}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
                         <span style={{ fontSize: '13px', flex: 1, color: ing.id ? '#1e293b' : '#ef4444', fontWeight: ing.id ? 'normal' : 'bold' }}>
                           {ing.name}
                         </span>
-                        <div style={{ display: 'flex', gap: '5px' }}>
+                        <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+                          {ing.id && <span style={{ fontSize: '13px', color: '#059669', fontWeight: 'bold', marginRight: '5px', whiteSpace: 'nowrap' }}>{calculatedCost} zł</span>}
                           <input type="number" style={{ ...inputS, width: '60px', padding: '8px', marginBottom: 0 }} value={ing.amount} onChange={(e) => { const c = [...newRecipe.ingredients]; c[idx].amount = e.target.value; setNewRecipe({ ...newRecipe, ingredients: c }); }} />
                           <span style={{ alignSelf: 'center', fontSize: '13px', width: '30px' }}>{ing.unit}</span>
                           <button onClick={() => setNewRecipe({ ...newRecipe, ingredients: newRecipe.ingredients.filter((_, i) => i !== idx) })} style={{ color: 'red', border: 'none', background: 'none', cursor: 'pointer', fontSize: '16px' }}>✕</button>
@@ -1207,7 +1245,7 @@ export default function App() {
                          </div>
                       )}
                     </div>
-                  ))}
+                  )})}
                   
                   <button style={btnSuccessFull} onClick={handleSaveRecipe}>{newRecipe.id ? 'Zaktualizuj' : 'Zapisz'}</button>
                 </div>
@@ -1283,7 +1321,10 @@ export default function App() {
       {/* --- NORMALNY PODGLĄD PRZEPISU --- */}
       {activeModal === 'view-recipe' && viewingRecipe && (
         <Modal title={viewingRecipe.name} onClose={() => setActiveModal(null)} isMobile={isMobile} isLandscape={isLandscape}>
-          
+          <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#059669', marginBottom: '15px', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Koszt: {parseFloat(viewingRecipe.total_cost || 0).toFixed(2)} zł</span>
+            <span style={{color: '#475569', fontSize: '14px', fontWeight: 'bold', background: '#f1f5f9', padding: '2px 8px', borderRadius: '8px'}}>Porcje: {viewingRecipe.portions || 1}</span>
+          </div>
           <button 
             style={{...btnSuccessFull, marginBottom: '15px', display: 'flex', justifyContent: 'center', gap: '10px', alignItems: 'center'}}
             onClick={() => {
@@ -1358,7 +1399,7 @@ export default function App() {
                 </button>
 
                 <button 
-                  onClick={() => setIsVoiceActive(!isVoiceActive)} 
+                  onClick={toggleVoiceMode} 
                   style={{
                     ...btnSec, 
                     background: isVoiceActive ? (isMicPaused ? '#fef08a' : '#fee2e2') : '#f1f5f9',
@@ -1377,9 +1418,10 @@ export default function App() {
               KROK {cookingStep + 1} Z {viewingRecipe.steps?.length || 0}
             </div>
 
+            {/* WSKAŹNIK MIKROFONU NA ŻYWO (Z react-speech-recognition) */}
             {isVoiceActive && (
               <div style={{fontSize: '12px', color: '#64748b', fontStyle: 'italic', marginBottom: '10px', textAlign: 'center'}}>
-                Słyszę: {lastHeard ? `"${lastHeard}"` : 'Czekam na komendę (np. "dalej", "powtórz")...'}
+                {listening ? (transcript ? `Słyszę: "${transcript}..."` : "Czekam na komendę (np. 'dalej', 'powtórz')...") : "Pauza mikrofonu..."}
               </div>
             )}
 
@@ -1405,7 +1447,10 @@ export default function App() {
             <div style={{display: 'flex', gap: '15px', marginTop: 'auto', paddingTop: '20px'}}>
               <button 
                 style={{...btnSuccessFull, background: '#f1f5f9', color: '#475569', flex: 1, fontSize: '18px'}} 
-                onClick={() => setCookingStep(prev => Math.max(prev - 1, 0))}
+                onClick={() => {
+                  setCookingStep(prev => Math.max(prev - 1, 0));
+                  handleMicPauseAndAction();
+                }}
                 disabled={cookingStep === 0}
               >
                 Wstecz
@@ -1419,6 +1464,7 @@ export default function App() {
                     window.speechSynthesis.cancel();
                   } else {
                     setCookingStep(prev => Math.min(prev + 1, viewingRecipe.steps.length - 1));
+                    handleMicPauseAndAction();
                   }
                 }}
               >
