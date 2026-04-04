@@ -8,9 +8,7 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 );
 
-// GŁÓWNY KLUCZ (do skanowania zdjęć i URL - model cięższy)
 const GEMINI_API_KEY = (import.meta.env.VITE_GEMINI_API_KEY || '').trim();
-// NOWY KLUCZ DLA CZATBOTA (model lżejszy)
 const GEMINI_CHAT_API_KEY = (import.meta.env.VITE_GEMINI_CHAT_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || '').trim();
 
 const MEAL_TYPES = ['Śniadanie', 'Lunch', 'Obiad', 'Podwieczorek', 'Kolacja'];
@@ -122,6 +120,7 @@ export default function App() {
 
   const [aiChatHistory, setAiChatHistory] = useState([]);
   const [aiChatQuery, setAiChatQuery] = useState('');
+  const [aiSuggestedRecipe, setAiSuggestedRecipe] = useState(null);
   const chatScrollRef = useRef(null);
 
   const [isAiLoading, setIsAiLoading] = useState(false); 
@@ -372,7 +371,6 @@ export default function App() {
     }
   };
 
-  // --- AI ZDJĘCIA (WIELE ZDJĘĆ) I URL ---
   const mapAiIngredientsToDb = (aiIngredients) => {
     return (aiIngredients || []).map(aiIng => {
       const aiNameLower = aiIng.name.toLowerCase();
@@ -383,67 +381,29 @@ export default function App() {
   }
 
   const handleAiRecipeScan = async (e) => {
-    // Odczytujemy WSZYSTKIE wybrane pliki
-    const files = Array.from(e.target.files);
-    if (!files.length || !GEMINI_API_KEY) return;
-    
+    const file = e.target.files[0]; if (!file || !GEMINI_API_KEY) return;
     setIsAiLoading(true);
     try {
-      // Mapujemy każdy plik na Promise zwracający obiekt inlineData dla Gemini
-      const base64Promises = files.map(file => {
-        return new Promise((res) => {
-          const r = new FileReader();
-          r.onloadend = () => res({
-            inlineData: { mimeType: file.type, data: r.result.split(',')[1] }
-          });
-          r.readAsDataURL(file);
-        });
-      });
-      
-      const imageParts = await Promise.all(base64Promises);
-
-      const prompt = `Jesteś ekspertem kulinarnym. Przeanalizuj podane zdjęcia i wygeneruj na ich podstawie przepis.
-      ZASADY:
-      1. Używaj TYLKO i WYŁĄCZNIE jednostek: g, ml, szt. Przelicz inne (np. łyżki, szklanki, pęczki) na te trzy jednostki.
-      2. W tablicy "steps" (kroki gotowania), za każdym razem gdy wspominasz o jakimś składniku z przepisu, BEZWZGLĘDNIE podaj w nawiasie lub bezpośrednio jego dokładną ilość (np. zamiast "dodaj masło i podsmaż cebulę" napisz "dodaj 50g masła i podsmaż 1szt cebuli").
-      Zwróć odpowiedź TYLKO w formacie JSON w bloku json. 
-      Format: {"name": "...", "instructions": "...", "portions": 2, "steps":["..."], "ingredients":[{"name": "...", "amount": 100, "unit": "g"}]}`;
-
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      const base64 = await new Promise((res) => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(file); });
+      const prompt = `Jesteś ekspertem kulinarnym. Przeanalizuj zdjęcie przepisu. Zwróć JSON w formacie: {"name": "...", "instructions": "...", "portions": 2, "steps":["..."], "ingredients":[{"name": "...", "amount": 100, "unit": "g"}]}`;
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          contents: [{ parts: [{ text: prompt }, ...imageParts] }], 
-          generationConfig: { responseMimeType: "application/json" } 
-        })
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: file.type, data: base64 } }] }], generationConfig: { responseMimeType: "application/json" } })
       });
-      
       const data = await response.json();
       const aiRecipe = extractJSON(data.candidates[0].content.parts[0].text);
-      
       if (aiRecipe) {
         const mapped = mapAiIngredientsToDb(aiRecipe.ingredients);
-        setNewRecipe(prev => ({...prev, ...aiRecipe, ingredients: mapped }));
+        setNewRecipe(prev => ({...prev, ...aiRecipe, ingredients: mapped, ingredients_mapped: true }));
       }
-    } catch (err) { 
-      alert("Błąd analizy zdjęć przez AI."); 
-      console.error(err);
-    } finally { 
-      setIsAiLoading(false); 
-      setShowAiPanel(false); 
-      e.target.value = null; // Czyszczenie inputu by można było wgrać te same zdjęcia
-    }
+    } catch (err) { alert("Błąd analizy zdjęcia przez AI."); } finally { setIsAiLoading(false); setShowAiPanel(false); }
   };
 
   const handleAiRecipeFromUrl = async () => {
     if (!aiUrl || !GEMINI_API_KEY) return;
     setIsAiLoading(true);
     try {
-      const prompt = `Pobierz przepis z podanego adresu URL: ${aiUrl}.
-      ZASADY:
-      1. Używaj TYLKO i WYŁĄCZNIE jednostek: g, ml, szt. Przelicz inne (łyżki, szklanki itp.) na te trzy jednostki.
-      2. W tablicy "steps" (kroki gotowania), za każdym razem gdy wspominasz o jakimś składniku, BEZWZGLĘDNIE podaj w treści kroku jego dokładną ilość (np. zamiast "dodaj mąkę" napisz "dodaj 250g mąki").
-      Zwróć JSON w bloku json. Format: {"name": "...", "instructions": "...", "portions": 2, "steps":["..."], "ingredients":[{"name": "...", "amount": 100, "unit": "g"}]}`;
-
+      const prompt = `Pobierz przepis z podanego adresu: ${aiUrl}. Zwróć JSON w bloku json. Format: {"name": "...", "instructions": "...", "portions": 2, "steps":["..."], "ingredients":[{"name": "...", "amount": 100, "unit": "g"}]}`;
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json" } })
@@ -452,13 +412,12 @@ export default function App() {
       const aiRecipe = extractJSON(data.candidates[0].content.parts[0].text);
       if (aiRecipe) {
         const mapped = mapAiIngredientsToDb(aiRecipe.ingredients);
-        setNewRecipe(prev => ({...prev, ...aiRecipe, ingredients: mapped }));
+        setNewRecipe(prev => ({...prev, ...aiRecipe, ingredients: mapped, ingredients_mapped: true }));
       }
       setAiUrl(''); setShowAiPanel(false);
     } catch (err) { alert("Błąd analizy URL przez AI."); } finally { setIsAiLoading(false); }
   };
 
-  // --- ASYSTENT DIETETYCZNY AI (CZAT) ---
   const handleAiDietAssist = async () => {
     if (!aiChatQuery.trim() || !viewingRecipe) return;
     if (!GEMINI_CHAT_API_KEY) {
@@ -481,39 +440,25 @@ export default function App() {
       };
 
       const systemPrompt = `Jesteś kulinarnym asystentem i dietetykiem. Użytkownik przegląda obecny przepis: ${JSON.stringify(currentRecipeContext)}.
-      Udzielaj porad dietetycznych, proponuj zamienniki (np. low fodmap, keto, wege), podpowiadaj jak wykluczyć składniki. Odpowiadaj zwięźle i na temat. NIE generuj struktury JSON.`;
+      Zaproponuj bezpieczne zamienniki i modyfikacje zgodnie z jego prośbą.
+      Zwróć nowy, pełny przepis w formacie JSON wewnatrz bloku \`\`\`json \`\`\` na samym końcu odpowiedzi.
+      Format JSON: {"name": "Zmieniona nazwa", "portions": 2, "instructions": "...", "steps": ["krok 1"], "ingredients": [{"name": "...", "amount": 100, "unit": "g"}]}`;
 
-      const validHistory = aiChatHistory.filter((msg, idx) => {
-        if (idx === 0 && msg.role === 'model') return false; 
-        if (msg.text.includes('Przepraszam, wystąpił problem') || msg.text.includes('Zbyt wiele zapytań')) return false;
-        return true;
-      });
+      const filteredHistory = aiChatHistory.filter((msg, idx) => !(idx === 0 && msg.role === 'model'));
 
-      const contents = [];
-      validHistory.forEach(msg => {
-        const lastRole = contents.length > 0 ? contents[contents.length - 1].role : null;
-        const currentRole = msg.role === 'user' ? 'user' : 'model';
-        
-        if (lastRole === currentRole) {
-          contents[contents.length - 1].parts[0].text += `\n\n${msg.text}`; 
-        } else {
-          contents.push({ role: currentRole, parts: [{ text: msg.text }] });
-        }
-      });
+      const historyForApi = filteredHistory.map(msg => ({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.text }]
+      }));
 
-      const finalRole = contents.length > 0 ? contents[contents.length - 1].role : null;
-      if (finalRole === 'user') {
-         contents[contents.length - 1].parts[0].text += `\n\n${userQuery}`;
-      } else {
-         contents.push({ role: 'user', parts: [{ text: userQuery }] });
-      }
+      historyForApi.push({ role: 'user', parts: [{ text: systemPrompt + "\n\nProśba użytkownika: " + userQuery }] });
 
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_CHAT_API_KEY}`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents: contents 
+          contents: historyForApi 
         })
       });
 
@@ -525,23 +470,53 @@ export default function App() {
       }
 
       const data = await response.json();
-      const replyText = data.candidates[0].content.parts[0].text;
+      const aiFullText = data.candidates[0].content.parts[0].text;
+      
+      const newRecipeJson = extractJSON(aiFullText);
+      let replyText = aiFullText;
 
-      setAiChatHistory(prev => [...prev, { role: 'model', text: replyText }]);
+      if (newRecipeJson) {
+        replyText = aiFullText.replace(/```json\n[\s\S]*?\n```/, '').replace(/```\n[\s\S]*?\n```/, '').replace(JSON.stringify(newRecipeJson), '').trim();
+        setAiSuggestedRecipe(newRecipeJson);
+      }
 
+      setAiChatHistory(prev => [...prev, { role: 'model', text: replyText || "Wygenerowałem nową wersję!" }]);
     } catch (err) {
-      console.error("Błąd w AI Chat:", err);
+      console.error(err);
       if (err.message === 'RATE_LIMIT_EXCEEDED') {
         setAiChatHistory(prev => [...prev, { role: 'model', text: 'Zbyt wiele zapytań w krótkim czasie. Odczekaj chwilę i spróbuj ponownie ⏳' }]);
       } else {
-        setAiChatHistory(prev => [...prev, { role: 'model', text: 'Przepraszam, wystąpił problem z serwerami Google. Spróbuj za chwilę.' }]);
+        setAiChatHistory(prev => [...prev, { role: 'model', text: 'Przepraszam, wystąpił problem z wygenerowaniem odpowiedzi. Spróbuj jeszcze raz.' }]);
       }
     } finally {
       setIsAiLoading(false);
     }
   };
 
-  // --- CRUD PRZEPISY / PRODUKTY ---
+  const applyAiSuggestedChanges = () => {
+    if (!aiSuggestedRecipe || !viewingRecipe) return;
+    const mappedIngredients = mapAiIngredientsToDb(aiSuggestedRecipe.ingredients);
+    
+    setNewRecipe({
+      id: null, 
+      name: aiSuggestedRecipe.name || viewingRecipe.name,
+      category: viewingRecipe.category || 'Obiad',
+      instructions: aiSuggestedRecipe.instructions || '',
+      image_url: viewingRecipe.image_url || '',
+      steps: aiSuggestedRecipe.steps || [],
+      ingredients: mappedIngredients,
+      is_favorite: false,
+      portions: aiSuggestedRecipe.portions || viewingRecipe.portions || 1
+    });
+
+    setRecipeListCategory(viewingRecipe.category || 'Obiad');
+    setActiveModal('recipe'); 
+    setShowRecipeForm(true); 
+    setAiSuggestedRecipe(null);
+    setAiChatHistory([]);
+    setViewMode('desc');
+  };
+
   const handleSaveRecipe = async () => {
     if (!newRecipe.name) return;
     const validIngredients = newRecipe.ingredients.filter(ing => ing.id || ing.product_id);
@@ -640,17 +615,19 @@ export default function App() {
               </div>
               {MEAL_TYPES.map((type) => {
                 const m = mealPlan.find((p) => p.date === day.fullDate && p.meal_type === type && p.recipes);
-                const hasImage = Boolean(m?.recipes?.image_url);
-                const bgStyle = hasImage ? `linear-gradient(to bottom, rgba(0,0,0,0.01) 30%, rgba(0,0,0,0.85) 100%), url(${m.recipes.image_url})` : MEAL_COLORS[type];
+                const fullRecipe = m ? recipes.find(r => r.id === m.recipe_id) || m.recipes : null;
+                const hasImage = Boolean(fullRecipe?.image_url);
+                const bgStyle = hasImage ? `linear-gradient(to bottom, rgba(0,0,0,0.01) 30%, rgba(0,0,0,0.85) 100%), url(${fullRecipe.image_url})` : MEAL_COLORS[type];
+                
                 return (
                   <div key={`${day.fullDate}-${type}`} style={{ ...(m ? cellStyleActive : cellStyleEmpty), backgroundImage: m ? bgStyle : undefined, backgroundSize: 'cover', backgroundPosition: 'center', paddingBottom: '10px' }} onClick={() => { if (!m) { setSelectedCell({ date: day.fullDate, type }); setFilterCategory(type); setActiveModal('cell'); } }}>
                     {isMobile && <span style={{ ...mobileMealTag, color: hasImage ? 'white' : '#475569' }}>{type}</span>}
                     {m ? (
                       <div style={mealContent}>
-                        <div style={{...mealNameS, color: hasImage ? 'white' : '#1e293b'}}>{m.recipes.is_favorite && '⭐ '}{m.recipes.name}</div>
+                        <div style={{...mealNameS, color: hasImage ? 'white' : '#1e293b'}}>{fullRecipe.is_favorite && '⭐ '}{fullRecipe.name}</div>
                         <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginTop: '12px' }}>
                           <button style={btnActionSmall} onClick={(e) => { e.stopPropagation(); setCommentingMealId(m.id); setCommentText(m.comment || ''); setActiveModal('meal-comment'); }}>📝</button>
-                          <button style={btnActionSmall} onClick={(e) => { e.stopPropagation(); setViewingRecipe(m.recipes); setViewMode('desc'); setActiveModal('view-recipe'); }}>ℹ️</button>
+                          <button style={btnActionSmall} onClick={(e) => { e.stopPropagation(); setViewingRecipe(fullRecipe); setViewMode('desc'); setActiveModal('view-recipe'); }}>ℹ️</button>
                           <button style={btnActionSmall} onClick={(e) => { e.stopPropagation(); if (confirm('Usunąć z planu?')) { supabase.from('meal_plan').delete().eq('id', m.id).then(() => fetchData()); } }}>✕</button>
                         </div>
                       </div>
@@ -864,15 +841,15 @@ export default function App() {
                   
                   {/* AKORDEON AI */}
                   <div style={{...formBoxS, background: '#fdf4ff', marginTop:'20px', borderRadius: '32px', borderColor: '#f0abfc'}}>
-                    <h4 onClick={() => setShowAiPanel(!showAiPanel)} style={{cursor:'pointer', display: 'flex', justifyContent: 'space-between', margin: 0, color: '#c026d3', fontWeight: '900'}}><span>✨ Pobierz przepis</span> <span>{showAiPanel?'▲':'▼'}</span></h4>
+                    <h4 onClick={() => setShowAiPanel(!showAiPanel)} style={{cursor:'pointer', display: 'flex', justifyContent: 'space-between', margin: 0, color: '#c026d3', fontWeight: '900'}}><span>✨ Magia AI</span> <span>{showAiPanel?'▲':'▼'}</span></h4>
                     {showAiPanel && (
                       <div style={{marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '15px'}}>
                         <input style={{...inputS, marginBottom:0, borderColor: '#fbcfe8'}} placeholder="Wklej link (URL)" value={aiUrl} onChange={e => setAiUrl(e.target.value)} />
                         <button onClick={handleAiRecipeFromUrl} style={{...btnPrim, background: '#d946ef'}}>{isAiLoading?'Chwileczkę...':'Pobierz przepis'}</button>
                         <div style={{textAlign: 'center', color: '#d946ef', fontWeight: '900', fontSize: '14px'}}>LUB</div>
                         <label style={{...btnPrim, textAlign:'center', background: '#d946ef', cursor: 'pointer', padding: '16px', borderRadius: '24px'}}>
-                          📷 Skanuj zdjęcia z galerii
-                          <input type="file" accept="image/*" multiple style={{display:'none'}} onChange={handleAiRecipeScan} />
+                          📷 Skanuj zdjęcie z galerii
+                          <input type="file" accept="image/*" style={{display:'none'}} onChange={handleAiRecipeScan} />
                         </label>
                       </div>
                     )}
@@ -1110,7 +1087,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 8. WIDOK PRZEPISU + ASYSTENT DIETETYCZNY AI (PORADY) */}
+      {/* 8. WIDOK PRZEPISU + ASYSTENT DIETETYCZNY AI */}
       {activeModal === 'view-recipe' && viewingRecipe && (
         <div style={immersiveOverlayS} onClick={() => setActiveModal(null)}>
           <div style={immersiveCardS} onClick={(e) => e.stopPropagation()}>
@@ -1127,10 +1104,10 @@ export default function App() {
                    if(viewMode === 'chat') setViewMode('desc'); 
                    else { 
                      setViewMode('chat'); 
-                     if(aiChatHistory.length === 0) setAiChatHistory([{role: 'model', text: 'Cześć! W czym mogę Ci dzisiaj pomóc z tym przepisem? Mogę np. zaproponować zamienniki do diety lub podpowiedzieć, jak uniknąć niechcianych składników.'}]); 
+                     if(aiChatHistory.length === 0) setAiChatHistory([{role: 'model', text: 'Cześć! W czym mogę Ci dzisiaj pomóc z tym przepisem? Mogę zaproponować zamienniki do diety lub podpowiedzieć, jak uniknąć niechcianych składników.'}]); 
                    }
                 }} style={{background: '#fdf4ff', border: '1px solid #f0abfc', color: '#c026d3', padding: '10px 15px', borderRadius: '20px', fontWeight: '900', cursor: 'pointer', marginLeft: '10px', flexShrink: 0}}>
-                   {viewMode === 'chat' ? '✕ Zamknij AI' : '✨ Dostosuj przepis'}
+                   {viewMode === 'chat' ? '✕ Zamknij AI' : '✨ Zmień z AI'}
                 </button>
               </div>
 
@@ -1146,7 +1123,7 @@ export default function App() {
                 </div>
               )}
 
-              {/* CZAT AI (BEZ ZMIANY W BAZIE) */}
+              {/* CZAT AI */}
               {viewMode === 'chat' ? (
                 <div style={{display: 'flex', flexDirection: 'column', height: '100%', minHeight: '300px'}}>
                   <div ref={chatScrollRef} className="hide-scrollbar" style={{flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '15px', paddingBottom: '20px'}}>
@@ -1157,11 +1134,18 @@ export default function App() {
                     ))}
                     {isAiLoading && <div className="chat-bubble-ai" style={{opacity: 0.7}}>Zastanawiam się... ⏳</div>}
                   </div>
+                  
+                  {aiSuggestedRecipe && (
+                    <div style={{background: '#ecfdf5', padding: '15px', borderRadius: '24px', border: '2px solid #34d399', marginBottom: '15px', textAlign: 'center'}}>
+                      <div style={{fontWeight: '900', color: '#059669', marginBottom: '10px'}}>AI przygotowało nową wersję przepisu!</div>
+                      <button onClick={applyAiSuggestedChanges} style={{...btnSuccessFull, background: '#059669', boxShadow: 'none'}}>🪄 Zobacz i zapisz zmiany</button>
+                    </div>
+                  )}
 
                   <div style={{display: 'flex', gap: '10px', background: '#f8fafc', padding: '10px', borderRadius: '30px', border: '1px solid #e2e8f0'}}>
                     <input 
                       style={{border: 'none', background: 'transparent', flex: 1, padding: '10px 15px', outline: 'none', fontSize: '15px', fontWeight: '600'}} 
-                      placeholder="Napisz do dietetyka AI..."
+                      placeholder="Np. Usuń cebulę, bez glutenu..."
                       value={aiChatQuery}
                       onChange={e => setAiChatQuery(e.target.value)}
                       onKeyDown={e => e.key === 'Enter' && handleAiDietAssist()}
