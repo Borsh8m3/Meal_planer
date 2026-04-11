@@ -386,7 +386,7 @@ export default function App() {
     try {
       const base64 = await new Promise((res) => { const r = new FileReader(); r.onloadend = () => res(r.result.split(',')[1]); r.readAsDataURL(file); });
       const prompt = `Jesteś ekspertem kulinarnym. Przeanalizuj zdjęcie przepisu. Zwróć JSON w formacie: {"name": "...", "instructions": "...", "portions": 2, "steps":["..."], "ingredients":[{"name": "...", "amount": 100, "unit": "g"}]}`;
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_CHAT_API_KEY}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: file.type, data: base64 } }] }], generationConfig: { responseMimeType: "application/json" } })
       });
